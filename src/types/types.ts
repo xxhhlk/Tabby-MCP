@@ -51,6 +51,17 @@ export interface ActiveCommand {
 }
 
 /**
+ * Command Security Configuration
+ */
+export interface CommandSecurityConfig {
+    autoAllowReadCommands: boolean;      // Auto-allow read/query commands
+    allowSudo: boolean;                   // Allow sudo commands to auto-execute
+    allowPipes: boolean;                  // Allow pipe operations to auto-execute
+    allowRedirects: boolean;              // Allow redirect operations to auto-execute
+    allowCommandChains: boolean;          // Allow command chains (&& ||) to auto-execute
+}
+
+/**
  * MCP Configuration
  */
 export interface McpConfig {
@@ -63,6 +74,8 @@ export interface McpConfig {
         enabled: boolean;
         showConfirmationDialog: boolean;
         autoFocusTerminal: boolean;
+        autoAllowReadCommands?: boolean;      // Auto-allow read/query commands
+        commandSecurity?: CommandSecurityConfig;  // Advanced security options
     };
     useStreamCapture?: boolean; // New experimental mode to fix output truncation
 }
@@ -111,10 +124,11 @@ export interface EnhancedTerminalSession {
 
 /**
  * Session locator for flexible session targeting
- * Priority: sessionId > tabIndex > title > profileName
+ * Priority: sessionId > tabId > tabIndex > title > profileName
  */
 export interface SessionLocator {
     sessionId?: string;      // Stable session ID (recommended)
+    tabId?: string;          // Stable tab ID (interchangeable with sessionId for terminal tabs)
     tabIndex?: number;       // Tab index (legacy, may change)
     title?: string;          // Match by title (partial, case-insensitive)
     profileName?: string;    // Match by profile name (partial, case-insensitive)

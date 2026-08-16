@@ -124,6 +124,51 @@ import { PLUGIN_VERSION } from '../version';
         </div>
       </div>
 
+      <div class="form-group" *ngIf="config.store.mcp?.pairProgrammingMode?.enabled && config.store.mcp?.pairProgrammingMode?.showConfirmationDialog">
+        <div class="checkbox">
+          <label>
+            <input type="checkbox" [ngModel]="config.store.mcp.pairProgrammingMode.autoAllowReadCommands ?? true" (ngModelChange)="setAutoAllowReadCommands($event)">
+            {{ t('mcp.pairProgramming.autoAllowRead') }}
+          </label>
+        </div>
+        <small class="form-text text-muted">
+          {{ t('mcp.pairProgramming.autoAllowRead.desc') }}
+        </small>
+      </div>
+
+      <!-- Advanced Security Options -->
+      <div class="form-group" *ngIf="config.store.mcp?.pairProgrammingMode?.enabled && config.store.mcp?.pairProgrammingMode?.showConfirmationDialog && config.store.mcp?.pairProgrammingMode?.autoAllowReadCommands">
+        <details class="advanced-options">
+          <summary>{{ t('mcp.pairProgramming.advancedOptions') }}</summary>
+          <div class="advanced-options-content mt-2">
+            <div class="checkbox">
+              <label>
+                <input type="checkbox" [ngModel]="config.store.mcp.pairProgrammingMode.commandSecurity?.allowSudo ?? false" (ngModelChange)="setCommandSecurityOption('allowSudo', $event)">
+                {{ t('mcp.pairProgramming.allowSudo') }}
+              </label>
+            </div>
+            <div class="checkbox">
+              <label>
+                <input type="checkbox" [ngModel]="config.store.mcp.pairProgrammingMode.commandSecurity?.allowPipes ?? true" (ngModelChange)="setCommandSecurityOption('allowPipes', $event)">
+                {{ t('mcp.pairProgramming.allowPipes') }}
+              </label>
+            </div>
+            <div class="checkbox">
+              <label>
+                <input type="checkbox" [ngModel]="config.store.mcp.pairProgrammingMode.commandSecurity?.allowRedirects ?? false" (ngModelChange)="setCommandSecurityOption('allowRedirects', $event)">
+                {{ t('mcp.pairProgramming.allowRedirects') }}
+              </label>
+            </div>
+            <div class="checkbox">
+              <label>
+                <input type="checkbox" [ngModel]="config.store.mcp.pairProgrammingMode.commandSecurity?.allowCommandChains ?? false" (ngModelChange)="setCommandSecurityOption('allowCommandChains', $event)">
+                {{ t('mcp.pairProgramming.allowCommandChains') }}
+              </label>
+            </div>
+          </div>
+        </details>
+      </div>
+
       <div class="form-group" *ngIf="config.store.mcp.pairProgrammingMode.enabled">
         <div class="checkbox">
           <label>
@@ -955,6 +1000,58 @@ export class McpSettingsTabComponent implements OnInit, OnDestroy {
     }
 
     setTimeout(() => { this.saveMessage = ''; }, 3000);
+  }
+
+  // ============== Command Security Options ==============
+
+  setAutoAllowReadCommands(value: boolean): void {
+    if (!this.config.store.mcp.pairProgrammingMode) {
+      this.config.store.mcp.pairProgrammingMode = {
+        enabled: true,
+        showConfirmationDialog: true,
+        autoFocusTerminal: true,
+        autoAllowReadCommands: value,
+        commandSecurity: {
+          autoAllowReadCommands: value,
+          allowSudo: false,
+          allowPipes: true,
+          allowRedirects: false,
+          allowCommandChains: false
+        }
+      };
+    } else {
+      this.config.store.mcp.pairProgrammingMode.autoAllowReadCommands = value;
+    }
+    this.saveConfig();
+  }
+
+  setCommandSecurityOption(option: 'allowSudo' | 'allowPipes' | 'allowRedirects' | 'allowCommandChains', value: boolean): void {
+    if (!this.config.store.mcp.pairProgrammingMode) {
+      this.config.store.mcp.pairProgrammingMode = {
+        enabled: true,
+        showConfirmationDialog: true,
+        autoFocusTerminal: true,
+        autoAllowReadCommands: true,
+        commandSecurity: {
+          autoAllowReadCommands: true,
+          allowSudo: false,
+          allowPipes: true,
+          allowRedirects: false,
+          allowCommandChains: false
+        }
+      };
+    }
+    if (!this.config.store.mcp.pairProgrammingMode.commandSecurity) {
+      this.config.store.mcp.pairProgrammingMode.commandSecurity = {
+        autoAllowReadCommands: true,
+        allowSudo: false,
+        allowPipes: true,
+        allowRedirects: false,
+        allowCommandChains: false
+      };
+    }
+    this.config.store.mcp.pairProgrammingMode.commandSecurity[option] = value;
+    this.saveConfig();
   }
 
   // ============== Size conversion helpers (MB <-> Bytes) ==============

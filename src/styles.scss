@@ -115,6 +115,32 @@
   }
 }
 
+// Advanced options styles
+.mcp-settings {
+  .advanced-options {
+    summary {
+      cursor: pointer;
+      color: var(--theme-primary);
+      font-size: 0.9em;
+      padding: 0.25rem 0;
+      
+      &:hover {
+        text-decoration: underline;
+      }
+    }
+    
+    .advanced-options-content {
+      padding-left: 1rem;
+      border-left: 2px solid var(--theme-border);
+      margin-left: 0.5rem;
+      
+      .checkbox {
+        margin-bottom: 0.5rem;
+      }
+    }
+  }
+}
+
 // Status bar indicator
 .mcp-status-indicator {
   display: inline-flex;

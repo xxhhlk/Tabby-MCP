@@ -60,8 +60,9 @@ export class TabManagementToolCategory extends BaseToolCategory {
     /**
      * Get or create stable tab ID
      * Uses bidirectional mapping for reliable lookup
+     * Made public for cross-category access (e.g., from TerminalToolCategory)
      */
-    private getOrCreateTabId(tab: BaseTabComponent): string {
+    public getOrCreateTabId(tab: BaseTabComponent): string {
         let tabId = this.tabToId.get(tab);
         if (!tabId) {
             tabId = 'tab-' + 'xxxxxxxx'.replace(/[x]/g, () => {
@@ -76,8 +77,9 @@ export class TabManagementToolCategory extends BaseToolCategory {
     /**
      * Find tab by its stable ID
      * Uses reverse lookup map for efficiency
+     * Made public for cross-category access (e.g., tabId -> tab from TerminalToolCategory)
      */
-    private findTabById(tabId: string): BaseTabComponent | null {
+    public findTabByTabId(tabId: string): BaseTabComponent | null {
         // First try the reverse lookup map
         const tab = this.idToTab.get(tabId);
         if (tab) {
@@ -101,14 +103,14 @@ export class TabManagementToolCategory extends BaseToolCategory {
 
     /**
      * Find tab by flexible locator
-     * Priority: tabId (stable) > tabIndex (legacy) > title (partial match)
+     * Priority: tabId (stable) > sessionId (stable) > tabIndex (legacy) > title (partial match)
      * If no locator is provided, returns the currently active/focused tab
      */
-    private findTabByLocator(locator: { tabId?: string; tabIndex?: number; title?: string }): BaseTabComponent | null {
+    private findTabByLocator(locator: { tabId?: string; sessionId?: string; tabIndex?: number; title?: string }): BaseTabComponent | null {
         this.logger.debug(`findTabByLocator called with: ${JSON.stringify(locator)}`);
 
         // If no locator parameters provided, return the currently active tab
-        if (!locator.tabId && locator.tabIndex === undefined && !locator.title) {
+        if (!locator.tabId && !locator.sessionId && locator.tabIndex === undefined && !locator.title) {
             const activeTab = this.app.tabs.find(tab => tab.hasFocus);
             if (activeTab) {
                 this.logger.debug('No locator provided, returning active/focused tab');
@@ -116,7 +118,7 @@ export class TabManagementToolCategory extends BaseToolCategory {
             }
             // If no focused tab, return the first tab
             if (this.app.tabs.length > 0) {
-                this.logger.debug('No focused tab, returning first tab');
+                this.logger.warn('findTabByLocator: no locator provided and no focused tab, returning first tab');
                 return this.app.tabs[0];
             }
             return null;
@@ -124,12 +126,21 @@ export class TabManagementToolCategory extends BaseToolCategory {
 
         // Priority 1: tabId (stable) - use optimized reverse lookup
         if (locator.tabId) {
-            const found = this.findTabById(locator.tabId);
+            const found = this.findTabByTabId(locator.tabId);
             if (found) {
                 this.logger.debug(`Found tab by tabId: ${locator.tabId}`);
                 return found;
             }
             this.logger.debug(`Tab not found by tabId: ${locator.tabId}`);
+        }
+        // Priority 1.5: sessionId (stable, interchangeable with tabId via terminal session lookup)
+        if (locator.sessionId) {
+            const session = this.terminalTools.findSessionByLocator({ sessionId: locator.sessionId });
+            if (session) {
+                this.logger.debug(`Found tab by sessionId: ${locator.sessionId}`);
+                return session.tabParent;
+            }
+            this.logger.debug(`Tab not found by sessionId: ${locator.sessionId}`);
         }
         // Priority 2: tabIndex
         if (locator.tabIndex !== undefined && locator.tabIndex >= 0 && locator.tabIndex < this.app.tabs.length) {
@@ -478,6 +489,8 @@ Use tabId (stable) for reliable tab targeting; tabIndex may change if tabs are r
                     const isTerminal = tab instanceof BaseTerminalTabComponent;
                     return {
                         tabId: this.getOrCreateTabId(tab),
+                        // sessionId is interchangeable with tabId for terminal tabs (can be used with exec_command etc.)
+                        sessionId: isTerminal ? this.terminalTools.getOrCreateSessionId(tab as BaseTerminalTabComponent) : undefined,
                         tabIndex: index,
                         title: tab.title || `Tab ${index}`,
                         type: tab.constructor.name,
@@ -505,13 +518,14 @@ Use tabId (stable) for reliable tab targeting; tabIndex may change if tabs are r
         return {
             name: 'select_tab',
             description: `Select/focus a specific tab.
-Tab targeting: tabId (stable, recommended) > tabIndex (legacy) > title (partial match)`,
+Tab targeting: tabId (stable, recommended) > sessionId (stable, interchangeable) > tabIndex (legacy) > title (partial match)`,
             schema: z.object({
                 tabId: z.string().optional().describe('Stable tab ID (recommended, from list_tabs)'),
+                sessionId: z.string().optional().describe('Stable session ID (from get_session_list or list_tabs, interchangeable with tabId for terminal tabs)'),
                 tabIndex: z.number().optional().describe('Tab index (legacy, may change)'),
                 title: z.string().optional().describe('Match by title (partial, case-insensitive)')
-            }),
-            handler: async (params: { tabId?: string; tabIndex?: number; title?: string }) => {
+            }).strict(),
+            handler: async (params: { tabId?: string; sessionId?: string; tabIndex?: number; title?: string }) => {
                 const tab = this.findTabByLocator(params);
 
                 if (!tab) {
@@ -541,20 +555,21 @@ Tab targeting: tabId (stable, recommended) > tabIndex (legacy) > title (partial 
         return {
             name: 'close_tab',
             description: `Close a specific tab. If no locator provided, closes the active tab.
-Tab targeting: tabId (stable, recommended) > tabIndex (legacy) > title (partial match)`,
+Tab targeting: tabId (stable, recommended) > sessionId (stable, interchangeable) > tabIndex (legacy) > title (partial match)`,
             schema: z.object({
                 tabId: z.string().optional().describe('Stable tab ID (recommended)'),
+                sessionId: z.string().optional().describe('Stable session ID (interchangeable with tabId for terminal tabs)'),
                 tabIndex: z.number().optional().describe('Tab index (legacy)'),
                 title: z.string().optional().describe('Match by title'),
                 force: z.boolean().optional().describe('Force close without asking (default: false)')
-            }),
-            handler: async (params: { tabId?: string; tabIndex?: number; title?: string; force?: boolean }) => {
-                const { tabId, tabIndex, title, force = false } = params;
+            }).strict(),
+            handler: async (params: { tabId?: string; sessionId?: string; tabIndex?: number; title?: string; force?: boolean }) => {
+                const { tabId, sessionId, tabIndex, title, force = false } = params;
 
                 let tab: BaseTabComponent | null;
                 // If any locator is provided, use findTabByLocator
-                if (tabId || tabIndex !== undefined || title) {
-                    tab = this.findTabByLocator({ tabId, tabIndex, title });
+                if (tabId || sessionId || tabIndex !== undefined || title) {
+                    tab = this.findTabByLocator({ tabId, sessionId, tabIndex, title });
                 } else {
                     // Default to active tab
                     tab = this.app.activeTab;

@@ -16,7 +16,17 @@ export class McpConfigProvider extends ConfigProvider {
             pairProgrammingMode: {
                 enabled: true,
                 showConfirmationDialog: true,
-                autoFocusTerminal: true
+                autoFocusTerminal: true,
+                // Auto-allow read/query commands
+                autoAllowReadCommands: true,
+                // Advanced security options
+                commandSecurity: {
+                    autoAllowReadCommands: true,   // Master switch
+                    allowSudo: false,               // sudo requires confirmation by default
+                    allowPipes: true,               // Pipes allowed by default
+                    allowRedirects: false,          // Redirects require confirmation by default
+                    allowCommandChains: false       // Command chains require confirmation by default
+                }
             },
             // Timing configuration (in milliseconds)
             timing: {
