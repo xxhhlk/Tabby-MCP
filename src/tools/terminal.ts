@@ -13,6 +13,15 @@ import { CommandSecurityManager } from '../security';
 import { TabManagementToolCategory } from './tabManagement';
 
 /**
+ * Shared zod refine: at least one session/tab targeting parameter is REQUIRED.
+ * Prevents silent execution on the wrong session when the LLM omits the locator
+ * (which used to fall back to the first/focused session - a common source of
+ * "command ran on the wrong machine" reports).
+ */
+const requireLocator = (p: any) => !!(p?.sessionId || p?.tabId || p?.tabIndex !== undefined || p?.title || p?.profileName);
+const LOCATOR_REQUIRED_MSG = 'At least one target is required: sessionId, tabId, tabIndex, title or profileName. Run get_session_list first to obtain a sessionId, then pass it explicitly.';
+
+/**
  * Terminal session with stable ID for tracking
  * Enhanced to support split pane identification
  */
@@ -304,6 +313,7 @@ export class TerminalToolCategory extends BaseToolCategory {
      * If no locator is provided, returns the currently active/focused session
      */
     public findSessionByLocator(locator: SessionLocator): TerminalSessionWithTab | null {
+        this.logger.debug(`findSessionByLocator called with: ${JSON.stringify(locator)}`);
         const sessions = this.findTerminalSessions();
 
         // If no locator parameters provided, return the currently active session
@@ -385,7 +395,14 @@ For split panes:
                     const tabAny = s.tab as any;
                     return {
                         sessionId: s.sessionId,
-                        tabId: this.tabManagement.getOrCreateTabId(s.tab),
+                        // tabId must match list_tabs: bind to the TOP-LEVEL tab (s.tabParent),
+                        // not the pane (s.tab). Otherwise list_tabs and get_session_list return
+                        // different IDs for the same window (split panes), and select_tab(tabId)
+                        // fails with "No matching tab found".
+                        tabId: this.tabManagement.getOrCreateTabId(s.tabParent),
+                        // Diagnostic: changes when Tabby reloads the plugin (all IDs are
+                        // regenerated then). Compare across calls to detect stale IDs.
+                        serverInstanceId: this.tabManagement.instanceId,
                         tabIndex: s.tabIndex,
                         title: s.tab.title || `Terminal ${s.tabIndex}`,
                         type: s.tab.constructor.name,
@@ -439,7 +456,7 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
                 profileName: z.string().optional().describe('Match session by profile name (partial, case-insensitive)'),
                 waitForOutput: z.boolean().optional().describe('Wait for command completion (default: true). Set false for interactive commands.'),
                 timeout: z.number().optional().describe('Timeout in ms (default: 30000, max: 300000)')
-            }).strict(),
+            }).strict().refine(requireLocator, { message: LOCATOR_REQUIRED_MSG }),
             handler: async (params: {
                 command: string;
                 sessionId?: string;
@@ -453,8 +470,13 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
                 const { command, sessionId, tabId, tabIndex, title, profileName, waitForOutput = true, timeout: rawTimeout = 30000 } = params;
                 const timeout = Math.min(rawTimeout, 300000); // Max 5 minutes
 
-                // Find session using locator
-                const session = this.findSessionByLocator({ sessionId, tabId, tabIndex, title, profileName });
+                // Find session using locator.
+                // Multiple locators may be provided by the LLM: they are tried in priority
+                // order (sessionId > tabId > tabIndex > title > profileName) and the FIRST
+                // match wins; the rest are ignored. Echo back what we received so the caller
+                // can see which parameter actually took effect.
+                const locator = { sessionId, tabId, tabIndex, title, profileName };
+                const session = this.findSessionByLocator(locator);
 
                 if (!session) {
                     return {
@@ -467,6 +489,12 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
                         }]
                     };
                 }
+
+                // Warn the caller when NO locator was provided: the command silently runs on
+                // the first/focused session, which is almost never what the caller intended.
+                const noLocatorWarning = !(sessionId || tabId || tabIndex !== undefined || title || profileName)
+                    ? `No locator provided - command executed on session ${session.sessionId} (${session.tab.title}). Always pass sessionId/tabId for reliable targeting.`
+                    : undefined;
 
                 // Check pair programming mode
                 if (this.config.store.mcp?.pairProgrammingMode?.enabled) {
@@ -521,7 +549,9 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
                                     success: true,
                                     sessionId: session.sessionId,
                                     message: 'Command sent (not waiting for output)',
-                                    hint: 'Use get_terminal_buffer with same sessionId to check output'
+                                    hint: 'Use get_terminal_buffer with same sessionId to check output',
+                                    receivedLocator: locator,
+                                    ...(noLocatorWarning ? { warning: noLocatorWarning } : {})
                                 })
                             }]
                         };
@@ -586,7 +616,8 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
                     this._activeCommandsSubject.next(new Map(this._activeCommands));
 
                     // Add sessionId to result for reference
-                    return { content: [{ type: 'text', text: JSON.stringify({ ...result, sessionId: session.sessionId }) }] };
+                    const resultWithSession = { ...result, sessionId: session.sessionId, receivedLocator: locator, ...(noLocatorWarning ? { warning: noLocatorWarning } : {}) };
+                    return { content: [{ type: 'text', text: JSON.stringify(resultWithSession) }] };
                 } catch (error: any) {
                     this._activeCommands.delete(session.sessionId);
                     this._activeCommandsSubject.next(new Map(this._activeCommands));
@@ -647,7 +678,7 @@ Special keys: \\x03 (Ctrl+C), \\x04 (Ctrl+D), \\x1b (Escape), \\r (Enter)`,
                 tabIndex: z.number().optional().describe('Tab index (legacy)'),
                 title: z.string().optional().describe('Match by title'),
                 profileName: z.string().optional().describe('Match by profile name')
-            }).strict(),
+            }).strict().refine(requireLocator, { message: LOCATOR_REQUIRED_MSG }),
             handler: async (params: { input: string; sessionId?: string; tabId?: string; tabIndex?: number; title?: string; profileName?: string }) => {
                 const { input, sessionId, tabId, tabIndex, title, profileName } = params;
 
@@ -786,7 +817,7 @@ Session targeting: sessionId > tabId > tabIndex > title > profileName`,
                 tabIndex: z.number().optional().describe('Tab index (legacy)'),
                 title: z.string().optional().describe('Match by title'),
                 profileName: z.string().optional().describe('Match by profile name')
-            }).strict(),
+            }).strict().refine(requireLocator, { message: LOCATOR_REQUIRED_MSG }),
             handler: async (params: { sessionId?: string; tabId?: string; tabIndex?: number; title?: string; profileName?: string }) => {
                 const environmentDetectionConfig = this.config.store.mcp?.environmentDetection;
                 if (environmentDetectionConfig?.enabled === false) {
@@ -971,7 +1002,7 @@ Session targeting: sessionId > tabId > tabIndex > title > profileName`,
                 lastNLines: z.number().optional().describe('Get only the last N lines (default: all)'),
                 startLine: z.number().optional().describe('Start line (0-indexed)'),
                 endLine: z.number().optional().describe('End line (exclusive)')
-            }).strict(),
+            }).strict().refine(requireLocator, { message: LOCATOR_REQUIRED_MSG }),
             handler: async (params: {
                 sessionId?: string;
                 tabId?: string;
@@ -1048,7 +1079,7 @@ Session targeting: sessionId > tabId > tabIndex > title > profileName`,
                 tabIndex: z.number().optional().describe('Tab index (legacy)'),
                 title: z.string().optional().describe('Match by title'),
                 profileName: z.string().optional().describe('Match by profile name')
-            }).strict(),
+            }).strict().refine(requireLocator, { message: LOCATOR_REQUIRED_MSG }),
             handler: async (params: { sessionId?: string; tabId?: string; tabIndex?: number; title?: string; profileName?: string }) => {
                 const { sessionId, tabId, tabIndex, title, profileName } = params;
 
@@ -1122,7 +1153,7 @@ Use sessionId to identify the exact pane to focus.
 After focusing, commands sent to that split tab will go to the focused pane.`,
             schema: z.object({
                 sessionId: z.string().describe('Session ID of the pane to focus (from get_session_list)')
-            }).strict(),
+            }).strict().refine(requireLocator, { message: LOCATOR_REQUIRED_MSG }),
             handler: async (params: { sessionId: string }) => {
                 const { sessionId } = params;
 

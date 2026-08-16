@@ -8,6 +8,13 @@ import { McpTool } from '../types/types';
 import { TerminalToolCategory } from './terminal';
 
 /**
+ * Shared zod refine: at least one tab targeting parameter is REQUIRED.
+ * Prevents "No matching tab found" when the LLM omits the locator.
+ */
+const requireTabLocator = (p: any) => !!(p?.tabId || p?.sessionId || p?.tabIndex !== undefined || p?.title);
+const TAB_LOCATOR_REQUIRED_MSG = 'At least one target is required: tabId, sessionId, tabIndex or title. Run list_tabs (or get_session_list) first to obtain a tabId/sessionId, then pass it explicitly.';
+
+/**
  * Tab Management Tools Category - Comprehensive tab and profile management
  */
 @Injectable({ providedIn: 'root' })
@@ -55,6 +62,13 @@ export class TabManagementToolCategory extends BaseToolCategory {
     private tabToId = new WeakMap<BaseTabComponent, string>();
     private idToTab = new Map<string, BaseTabComponent>();
 
+    /**
+     * Instance ID of this plugin runtime. Changes whenever Tabby reloads the plugin
+     * (restart, plugin update). ALL cached tab/session IDs are regenerated after that,
+     * so clients should re-query get_session_list/list_tabs when this value changes.
+     */
+    public readonly instanceId = 'inst-' + Math.random().toString(36).slice(2, 10);
+
     // ============= Tab Operations =============
 
     /**
@@ -69,8 +83,9 @@ export class TabManagementToolCategory extends BaseToolCategory {
                 return (Math.random() * 16 | 0).toString(16);
             });
             this.tabToId.set(tab, tabId);
-            this.idToTab.set(tabId, tab);
         }
+        // Keep reverse map in sync (re-register on every call to survive tab re-creation)
+        this.idToTab.set(tabId, tab);
         return tabId;
     }
 
@@ -87,6 +102,12 @@ export class TabManagementToolCategory extends BaseToolCategory {
             if (this.app.tabs.includes(tab)) {
                 return tab;
             }
+            // If it's a split pane (not a top-level tab), return its parent split tab
+            const parent = this.app.getParentTab(tab);
+            if (parent) {
+                this.idToTab.set(tabId, parent);
+                return parent;
+            }
             // Clean up stale reference
             this.idToTab.delete(tabId);
         }
@@ -96,6 +117,17 @@ export class TabManagementToolCategory extends BaseToolCategory {
                 // Re-register in reverse map
                 this.idToTab.set(tabId, t);
                 return t;
+            }
+            // Also scan split panes: get_session_list generates pane-level IDs, but
+            // select_tab/close_tab target top-level tabs. Resolve to the parent split
+            // tab so the whole window gets focused/closed.
+            if (t instanceof SplitTabComponent) {
+                for (const child of t.getAllTabs()) {
+                    if (this.tabToId.get(child) === tabId) {
+                        this.idToTab.set(tabId, t);
+                        return t;
+                    }
+                }
             }
         }
         return null;
@@ -508,7 +540,7 @@ Use tabId (stable) for reliable tab targeting; tabIndex may change if tabs are r
 
                 this.logger.info(`Listed ${tabs.length} tabs`);
                 return {
-                    content: [{ type: 'text', text: JSON.stringify({ success: true, tabs, count: tabs.length }, null, 2) }]
+                    content: [{ type: 'text', text: JSON.stringify({ success: true, serverInstanceId: this.instanceId, tabs, count: tabs.length }, null, 2) }]
                 };
             }
         };
@@ -524,7 +556,7 @@ Tab targeting: tabId (stable, recommended) > sessionId (stable, interchangeable)
                 sessionId: z.string().optional().describe('Stable session ID (from get_session_list or list_tabs, interchangeable with tabId for terminal tabs)'),
                 tabIndex: z.number().optional().describe('Tab index (legacy, may change)'),
                 title: z.string().optional().describe('Match by title (partial, case-insensitive)')
-            }).strict(),
+            }).strict().refine(requireTabLocator, { message: TAB_LOCATOR_REQUIRED_MSG }),
             handler: async (params: { tabId?: string; sessionId?: string; tabIndex?: number; title?: string }) => {
                 const tab = this.findTabByLocator(params);
 
@@ -534,7 +566,7 @@ Tab targeting: tabId (stable, recommended) > sessionId (stable, interchangeable)
                             type: 'text', text: JSON.stringify({
                                 success: false,
                                 error: 'No matching tab found',
-                                hint: 'Use list_tabs to see available tabs with their tabIds'
+                                hint: 'Use list_tabs to see available tabs with their tabIds. If Tabby was restarted, all tab/session IDs are regenerated - re-query get_session_list first.'
                             })
                         }]
                     };
@@ -562,7 +594,7 @@ Tab targeting: tabId (stable, recommended) > sessionId (stable, interchangeable)
                 tabIndex: z.number().optional().describe('Tab index (legacy)'),
                 title: z.string().optional().describe('Match by title'),
                 force: z.boolean().optional().describe('Force close without asking (default: false)')
-            }).strict(),
+            }).strict().refine(requireTabLocator, { message: TAB_LOCATOR_REQUIRED_MSG }),
             handler: async (params: { tabId?: string; sessionId?: string; tabIndex?: number; title?: string; force?: boolean }) => {
                 const { tabId, sessionId, tabIndex, title, force = false } = params;
 

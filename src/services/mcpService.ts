@@ -241,10 +241,11 @@ export class McpService {
                     return;
                 }
 
-                // No session - return info about how to connect
-                res.status(400).json({
-                    error: 'Session required',
-                    message: 'Send a POST request with initialize message first to establish session'
+                // Unknown/missing session - tell the client to re-initialize
+                // (404 semantics per Streamable HTTP spec: clients treat it as a stale session)
+                res.status(404).json({
+                    error: 'Session not found',
+                    message: 'Session expired or server restarted. Please re-initialize the MCP connection.'
                 });
                 return;
             }
@@ -273,6 +274,28 @@ export class McpService {
                 const acceptHeader = req.headers.accept || '';
 
                 this.logger.debug(`Streamable HTTP: POST /mcp sessionId=${sessionId}`);
+
+                // FIX: Detect stale sessions (e.g. after Tabby restart or client reconnect).
+                // The client may still send its old session ID without re-running the
+                // initialize handshake. Creating a fresh transport that reuses that ID would
+                // make the SDK return 400 "Server not initialized" (validateSession on a
+                // transport with _initialized=false) - and most clients never recover from
+                // that, leaving every tool call stuck in "not initialized".
+                // Per the Streamable HTTP spec, an unknown session must be answered with
+                // 404 Not Found, which tells clients to re-initialize the connection.
+                const body: any = req.body;
+                const isInitialize = body?.method === 'initialize' ||
+                    (Array.isArray(body) && body.some((m: any) => m?.method === 'initialize'));
+
+                if (sessionId && !this.streamableTransports[sessionId] && !isInitialize) {
+                    this.logger.warn(`Streamable HTTP: Session ${sessionId} not found (server restarted?), returning 404 to force client re-initialization`);
+                    res.status(404).json({
+                        jsonrpc: '2.0',
+                        error: { code: -32001, message: 'Session not found. Please re-initialize the MCP connection.' },
+                        id: body?.id ?? null
+                    });
+                    return;
+                }
 
                 // Check if we need to create new transport
                 let transport = this.streamableTransports[sessionId];
