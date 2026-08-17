@@ -419,7 +419,7 @@ export class McpService {
             } catch (error) {
                 this.logger.error('Legacy SSE: Failed to establish connection:', error);
                 if (!res.headersSent) {
-                    res.status(500).send('Failed to establish SSE connection');
+                    res.status(500).send('Failed to establish SSE connection: ' + ((error && (error as any).stack) || (error && (error as any).message) || error));
                 }
             }
         });
