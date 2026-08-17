@@ -136,23 +136,24 @@ export class TabManagementToolCategory extends BaseToolCategory {
     /**
      * Find tab by flexible locator
      * Priority: tabId (stable) > sessionId (stable) > tabIndex (legacy) > title (partial match)
-     * If no locator is provided, returns the currently active/focused tab
+     * If no locator is provided, returns the currently active/focused tab only
      */
     private findTabByLocator(locator: { tabId?: string; sessionId?: string; tabIndex?: number; title?: string }): BaseTabComponent | null {
         this.logger.debug(`findTabByLocator called with: ${JSON.stringify(locator)}`);
 
-        // If no locator parameters provided, return the currently active tab
+        // HARDENED: No locator -> active/focused tab only. Never silently fall back to
+        // tabs[0], otherwise batch tool calls without a locator all land on tab #1.
         if (!locator.tabId && !locator.sessionId && locator.tabIndex === undefined && !locator.title) {
-            const activeTab = this.app.tabs.find(tab => tab.hasFocus);
-            if (activeTab) {
+            const focusedTab = this.app.tabs.find(tab => tab.hasFocus);
+            if (focusedTab) {
                 this.logger.debug('No locator provided, returning active/focused tab');
-                return activeTab;
+                return focusedTab;
             }
-            // If no focused tab, return the first tab
-            if (this.app.tabs.length > 0) {
-                this.logger.warn('findTabByLocator: no locator provided and no focused tab, returning first tab');
-                return this.app.tabs[0];
+            if (this.app.activeTab) {
+                this.logger.debug('No locator provided, returning this.app.activeTab');
+                return this.app.activeTab;
             }
+            this.logger.warn('findTabByLocator: no locator provided and no active/focused tab - refusing to guess first tab');
             return null;
         }
 
@@ -180,13 +181,24 @@ export class TabManagementToolCategory extends BaseToolCategory {
             this.logger.debug(`Found tab by tabIndex: ${locator.tabIndex}`);
             return found;
         }
-        // Priority 3: title (partial match, case-insensitive)
+        // Priority 3: title - exact match first; fuzzy (includes) match only when it is
+        // unambiguous. Multiple fuzzy hits are REJECTED instead of silently picking tab #1.
         if (locator.title) {
             const titleLower = locator.title.toLowerCase();
-            const found = this.app.tabs.find(tab => tab.title?.toLowerCase().includes(titleLower));
-            if (found) {
-                this.logger.debug(`Found tab by title: ${locator.title}`);
-                return found;
+            const exact = this.app.tabs.find(tab => tab.title?.toLowerCase() === titleLower);
+            if (exact) {
+                this.logger.debug(`Found tab by title (exact): ${locator.title}`);
+                return exact;
+            }
+            const fuzzy = this.app.tabs.filter(tab => tab.title?.toLowerCase().includes(titleLower));
+            if (fuzzy.length === 1) {
+                this.logger.debug(`Found tab by title (fuzzy, unique): ${locator.title}`);
+                return fuzzy[0];
+            }
+            if (fuzzy.length > 1) {
+                const titles = fuzzy.map(t => `"${t.title}"`).join(', ');
+                this.logger.warn(`Title "${locator.title}" is ambiguous (${fuzzy.length} matches: ${titles}) - pass tabId/sessionId instead`);
+                return null;
             }
             this.logger.debug(`Tab not found by title: ${locator.title}`);
         }
@@ -550,7 +562,7 @@ Use tabId (stable) for reliable tab targeting; tabIndex may change if tabs are r
         return {
             name: 'select_tab',
             description: `Select/focus a specific tab.
-Tab targeting: tabId (stable, recommended) > sessionId (stable, interchangeable) > tabIndex (legacy) > title (partial match)`,
+Tab targeting: tabId (stable, recommended) > sessionId (stable, interchangeable) > tabIndex (legacy) > title (exact first, fuzzy only if unambiguous)`,
             schema: z.object({
                 tabId: z.string().optional().describe('Stable tab ID (recommended, from list_tabs)'),
                 sessionId: z.string().optional().describe('Stable session ID (from get_session_list or list_tabs, interchangeable with tabId for terminal tabs)'),
@@ -587,7 +599,7 @@ Tab targeting: tabId (stable, recommended) > sessionId (stable, interchangeable)
         return {
             name: 'close_tab',
             description: `Close a specific tab. If no locator provided, closes the active tab.
-Tab targeting: tabId (stable, recommended) > sessionId (stable, interchangeable) > tabIndex (legacy) > title (partial match)`,
+Tab targeting: tabId (stable, recommended) > sessionId (stable, interchangeable) > tabIndex (legacy) > title (exact first, fuzzy only if unambiguous)`,
             schema: z.object({
                 tabId: z.string().optional().describe('Stable tab ID (recommended)'),
                 sessionId: z.string().optional().describe('Stable session ID (interchangeable with tabId for terminal tabs)'),

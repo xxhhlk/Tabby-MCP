@@ -310,21 +310,22 @@ export class TerminalToolCategory extends BaseToolCategory {
     /**
      * Find session by flexible locator
      * Priority: sessionId > tabId > tabIndex > title > profileName
-     * If no locator is provided, returns the currently active/focused session
+     * If no locator is provided, returns the currently focused session only
      */
     public findSessionByLocator(locator: SessionLocator): TerminalSessionWithTab | null {
         this.logger.debug(`findSessionByLocator called with: ${JSON.stringify(locator)}`);
         const sessions = this.findTerminalSessions();
 
-        // If no locator parameters provided, return the currently active session
+        // HARDENED: No locator -> focused session only. Never silently fall back to the
+        // first session, otherwise batch tool calls all land on tab #1.
         if (!locator.sessionId && !locator.tabId && locator.tabIndex === undefined && !locator.title && !locator.profileName) {
-            // First try to find the focused pane in a split
             const focusedSession = sessions.find(s => s.isFocusedPane === true);
-            if (focusedSession) return focusedSession;
-
-            // Otherwise return the first session (most recently used)
-            this.logger.warn('findSessionByLocator: no locator provided, falling back to first/focused session');
-            return sessions[0] || null;
+            if (focusedSession) {
+                this.logger.debug('findSessionByLocator: no locator provided, returning focused session');
+                return focusedSession;
+            }
+            this.logger.warn('findSessionByLocator: no locator provided and no focused session - refusing to guess');
+            return null;
         }
 
         // Priority 1: sessionId (stable, recommended)
@@ -344,29 +345,57 @@ export class TerminalToolCategory extends BaseToolCategory {
             this.logger.debug(`findSessionByLocator: no session matched tabId=${locator.tabId}`);
         }
 
-        // Priority 2: tabIndex (legacy, may change)
+        // Priority 2: tabIndex (legacy, may change) - same semantics as list_tabs (index of
+        // the PARENT tab in app.tabs). Split panes share the parent's tabIndex; prefer the
+        // focused pane when one exists.
         if (locator.tabIndex !== undefined) {
-            const found = sessions.find(s => s.tabIndex === locator.tabIndex);
-            if (found) return found;
+            const matches = sessions.filter(s => s.tabIndex === locator.tabIndex);
+            if (matches.length > 0) {
+                const focused = matches.find(s => s.isFocusedPane === true);
+                if (focused) return focused;
+                this.logger.warn(`findSessionByLocator: tabIndex ${locator.tabIndex} matched ${matches.length} split panes, no focused pane - using first`);
+                return matches[0];
+            }
         }
 
-        // Priority 3: title (partial, case-insensitive)
+        // Priority 3: title - exact match first; fuzzy (includes) match only when it is
+        // unambiguous. Multiple fuzzy hits are REJECTED instead of silently picking tab #1.
         if (locator.title) {
             const titleLower = locator.title.toLowerCase();
-            const found = sessions.find(s =>
-                s.tab.title?.toLowerCase().includes(titleLower)
-            );
-            if (found) return found;
+            const exact = sessions.find(s => s.tab.title?.toLowerCase() === titleLower);
+            if (exact) return exact;
+            const fuzzy = sessions.filter(s => s.tab.title?.toLowerCase().includes(titleLower));
+            if (fuzzy.length === 1) return fuzzy[0];
+            if (fuzzy.length > 1) {
+                const titles = fuzzy.map(s => `"${s.tab.title}"`).join(', ');
+                this.logger.warn(`findSessionByLocator: title "${locator.title}" is ambiguous (${fuzzy.length} matches: ${titles}) - pass sessionId/tabId instead`);
+                return null;
+            }
+            this.logger.debug(`findSessionByLocator: no session matched title=${locator.title}`);
         }
 
-        // Priority 4: profileName (partial, case-insensitive)
+        // Priority 4: profileName - exact match first; unambiguous fuzzy only.
         if (locator.profileName) {
             const nameLower = locator.profileName.toLowerCase();
-            const found = sessions.find(s => {
+            const exact = sessions.find(s => {
+                const profile = (s.tab as any).profile;
+                return profile?.name?.toLowerCase() === nameLower;
+            });
+            if (exact) return exact;
+            const fuzzy = sessions.filter(s => {
                 const profile = (s.tab as any).profile;
                 return profile?.name?.toLowerCase().includes(nameLower);
             });
-            if (found) return found;
+            if (fuzzy.length === 1) return fuzzy[0];
+            if (fuzzy.length > 1) {
+                const names = fuzzy.map(s => {
+                    const profile = (s.tab as any).profile;
+                    return `"${profile?.name}"`;
+                }).join(', ');
+                this.logger.warn(`findSessionByLocator: profileName "${locator.profileName}" is ambiguous (${fuzzy.length} matches: ${names}) - pass sessionId/tabId instead`);
+                return null;
+            }
+            this.logger.debug(`findSessionByLocator: no session matched profileName=${locator.profileName}`);
         }
 
         return null;
@@ -381,10 +410,11 @@ export class TerminalToolCategory extends BaseToolCategory {
             name: 'get_session_list',
             description: `Get list of all terminal sessions with stable IDs and metadata.
 Use sessionId (stable UUID) or tabId (stable tab ID, interchangeable) for reliable session targeting.
+tabIndex matches list_tabs (index of the PARENT tab in app.tabs); split panes share the same tabIndex - use paneIndex to distinguish panes inside a split.
 
 For split panes:
 - isSplit: true if this session is inside a split tab
-- splitTabIndex: Index of parent tab (use for grouping panes)
+- splitTabIndex: Index of parent tab (use for grouping panes, same as tabIndex)
 - paneIndex: Position within the split (0, 1, 2, ...)
 - totalPanes: Number of panes in the split
 - isFocusedPane: Whether this is the currently focused pane`,
@@ -442,7 +472,7 @@ Session targeting (priority order): sessionId > tabId > tabIndex > title > profi
 - sessionId: Stable UUID (recommended, use get_session_list to get IDs)
 - tabId: Stable tab ID (from list_tabs or get_session_list, interchangeable with sessionId for terminal tabs)
 - tabIndex: Array index (legacy, may change if tabs are reordered)
-- title: Match by terminal title (partial, case-insensitive)
+- title: Match by terminal title (exact match first; fuzzy only if unambiguous)
 - profileName: Match by profile name (partial, case-insensitive)
 
 For interactive/paging commands (less, vim, top), set waitForOutput=false.
@@ -1211,7 +1241,6 @@ After focusing, commands sent to that split tab will go to the focused pane.`,
      */
     public findTerminalSessions(): TerminalSessionWithTab[] {
         const sessions: TerminalSessionWithTab[] = [];
-        let globalIndex = 0;
 
         this.app.tabs.forEach((tab: BaseTabComponent, appTabIndex: number) => {
             if (tab instanceof BaseTerminalTabComponent) {
@@ -1219,7 +1248,11 @@ After focusing, commands sent to that split tab will go to the focused pane.`,
                 const sessionId = this.getOrCreateSessionId(tab);
                 sessions.push({
                     sessionId,
-                    tabIndex: globalIndex++,
+                    // HARDENED: tabIndex must match list_tabs (index of the PARENT tab in
+                    // app.tabs). It was previously a global session counter (globalIndex++),
+                    // which made split panes consume extra slots so get_session_list tabIndex
+                    // disagreed with list_tabs and batch calls landed on the wrong tab.
+                    tabIndex: appTabIndex,
                     tabParent: tab,
                     tab: tab as BaseTerminalTabComponent,
                     isSplit: false
@@ -1239,7 +1272,7 @@ After focusing, commands sent to that split tab will go to the focused pane.`,
                     const sessionId = this.getOrCreateSessionId(termTab);
                     sessions.push({
                         sessionId,
-                        tabIndex: globalIndex++,
+                        tabIndex: appTabIndex,
                         tabParent: tab,
                         tab: termTab,
                         isSplit: true,
