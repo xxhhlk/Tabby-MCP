@@ -13,7 +13,15 @@
  *        node scripts/mcp-test.cjs call get_session_list '{}'
  *        node scripts/mcp-test.cjs call exec_command '{"command":"hostname","sessionId":"<id>"}'
  *   node scripts/mcp-test.cjs regress [--port 34266]
- *      回归测试：isFocusedPane 唯一性 + exec_command 定位正确性（非零退出码 = 失败）
+ *      回归测试（自动断言，非零退出码 = 失败）：
+ *        1. tools/list
+ *        2. get_session_list isFocusedPane 唯一性
+ *        3. exec_command 带 sessionId 定位正确性
+ *        4. select_tab 切换聚焦 → 验证 isFocusedPane 迁移且唯一
+ *        5. exec_command 不带 locator → 验证落在刚切换的会话（fallback 认 activeTab）
+ *        6. 随机多切 3 个标签，逐个验证聚焦唯一迁移
+ *        7. 随机多切后 exec_command 无 locator → 落在最后一个随机目标
+ *        最后自动恢复原聚焦会话（不改变你的界面状态）
  *
  * 依赖：仓库 node_modules 中的 @modelcontextprotocol/sdk（Node >= 22，自带 fetch）
  *
@@ -84,53 +92,156 @@ async function cmdCall(toolName, jsonArgs) {
 }
 
 // ---------- regress（回归断言） ----------
+async function getSessions(client) {
+    const text = extractText(await client.callTool({ name: 'get_session_list', arguments: {} }));
+    let sessions;
+    try {
+        sessions = JSON.parse(text);
+    } catch {
+        sessions = JSON.parse(JSON.stringify(text));
+    }
+    return sessions;
+}
+
+/** 执行 hostname 并返回解析后的结果对象 */
+async function execHostname(client, args) {
+    const text = extractText(await client.callTool({
+        name: 'exec_command',
+        arguments: { command: 'hostname', waitForOutput: true, timeout: 20000, ...args }
+    }));
+    try {
+        return { raw: text, parsed: JSON.parse(text) };
+    } catch {
+        return { raw: text, parsed: null };
+    }
+}
+
 async function cmdRegress() {
     let failed = false;
     const client = await connect();
     try {
         // 1) tools/list
         const { tools } = await client.listTools();
-        console.log(`[1/3] tools/list → ${tools.length} 个工具`);
+        console.log(`[1/5] tools/list → ${tools.length} 个工具`);
 
         // 2) get_session_list: isFocusedPane 唯一性
-        const sessText = extractText(await client.callTool({ name: 'get_session_list', arguments: {} }));
-        let sessions;
-        try {
-            sessions = JSON.parse(sessText);
-        } catch {
-            sessions = JSON.parse(JSON.stringify(sessText));
-        }
+        const sessions = await getSessions(client);
         const focused = sessions.filter(s => s && s.isFocusedPane === true);
-        console.log(`[2/3] get_session_list → ${sessions.length} 个会话, isFocusedPane=true: ${focused.length} 个`);
+        console.log(`[2/5] get_session_list → ${sessions.length} 个会话, isFocusedPane=true: ${focused.length} 个`);
         if (focused.length > 1) {
             console.error('  ✗ FAIL: isFocusedPane 不唯一（多 split 布局 bug），聚焦会话应为 0 或 1 个');
             failed = true;
         } else {
-            console.log(`  ✓ ${focused.length === 1 ? `聚焦会话唯一: ${focused[0].title}` : '无聚焦标记（无 split 或均未聚焦，符合预期）'}`);
+            console.log(`  ✓ ${focused.length === 1 ? `聚焦会话唯一: ${focused[0].title}` : '无聚焦标记（符合预期）'}`);
         }
 
-        // 3) exec_command 定位正确性：用第一个会话的 sessionId 执行 hostname
         if (sessions.length === 0) {
             console.error('  ✗ SKIP: 无会话可测');
             failed = true;
         } else {
-            const target = sessions[0];
-            console.log(`[3/3] exec_command(hostname) 定位 → sessionId=${target.sessionId} (${target.title})`);
-            const execText = extractText(await client.callTool({
-                name: 'exec_command',
-                arguments: { command: 'hostname', sessionId: target.sessionId, waitForOutput: true, timeout: 15000 }
-            }));
-            let parsed = null;
-            try { parsed = JSON.parse(execText); } catch { /* 保持 null */ }
-            console.log(`  → 返回: ${(execText || '').slice(0, 200)}`);
-            if (parsed && parsed.sessionId && parsed.sessionId !== target.sessionId) {
-                console.error(`  ✗ FAIL: 期望执行于 ${target.sessionId}, 实际返回 ${parsed.sessionId}`);
+            const original = focused.length === 1 ? focused[0] : null;
+
+            // 3) exec_command 带 sessionId 定位正确性（目标 = 一个非聚焦会话）
+            const target = sessions.find(s => s !== original) || sessions[0];
+            console.log(`[3/5] exec_command(hostname) 带 sessionId 定位 → ${target.title}`);
+            let r = await execHostname(client, { sessionId: target.sessionId });
+            console.log(`  → ${(r.raw || '').slice(0, 160)}`);
+            if (r.parsed && r.parsed.sessionId && r.parsed.sessionId !== target.sessionId) {
+                console.error(`  ✗ FAIL: 期望执行于 ${target.sessionId}, 实际 ${r.parsed.sessionId}`);
                 failed = true;
-            } else if (parsed && parsed.error) {
-                console.error(`  ✗ FAIL: 执行报错: ${parsed.error}`);
+            } else if (r.parsed && r.parsed.error) {
+                console.error(`  ✗ FAIL: ${r.parsed.error}`);
                 failed = true;
             } else {
                 console.log('  ✓ 定位正确');
+            }
+
+            // 4) select_tab 切换聚焦到 target
+            console.log(`[4/5] select_tab 切换聚焦 → ${target.title}`);
+            const stText = extractText(await client.callTool({ name: 'select_tab', arguments: { sessionId: target.sessionId } }));
+            let st = null;
+            try { st = JSON.parse(stText); } catch { /* 保持 null */ }
+            console.log(`  → ${(stText || '').slice(0, 160)}`);
+            if (!st || st.success !== true) {
+                console.error(`  ✗ FAIL: select_tab 未返回 success: ${stText}`);
+                failed = true;
+            } else {
+                // 5) 验证聚焦已迁移到 target 且唯一
+                const sessions2 = await getSessions(client);
+                const t2 = sessions2.find(s => s.sessionId === target.sessionId);
+                const focused2 = sessions2.filter(s => s.isFocusedPane === true);
+                const ok = t2 && t2.isFocusedPane === true && focused2.length === 1;
+                console.log(`  → 切换后 isFocusedPane: ${focused2.length} 个 (${t2 ? t2.title : '?'}${t2 && t2.isFocusedPane ? ' ✓' : ' ✗'})`);
+                if (!ok) {
+                    console.error('  ✗ FAIL: select_tab 后聚焦未迁移到目标会话（或仍不唯一）');
+                    failed = true;
+                } else {
+                    // 6) exec_command 不带 locator → 应落在刚切换的 target（fallback 走 activeTab）
+                    console.log(`[5/5] exec_command(hostname) 无 locator → 应落在 ${target.title}`);
+                    r = await execHostname(client, {});
+                    console.log(`  → ${(r.raw || '').slice(0, 160)}`);
+                    if (r.parsed && r.parsed.sessionId && r.parsed.sessionId !== target.sessionId) {
+                        console.error(`  ✗ FAIL: 期望落在 ${target.sessionId}, 实际 ${r.parsed.sessionId}`);
+                        failed = true;
+                    } else if (r.parsed && r.parsed.error) {
+                        console.error(`  ✗ FAIL: ${r.parsed.error}`);
+                        failed = true;
+                    } else {
+                        console.log('  ✓ 无 locator 落在切换后的目标（fallback 认 activeTab）');
+                    }
+                }
+            }
+
+            // 6) 随机多切标签：随机挑若干会话逐个 select_tab 切换，验证聚焦唯一迁移
+            const others = sessions.filter(s => s !== original && s.sessionId !== target.sessionId);
+            const shuffled = others.sort(() => Math.random() - 0.5).slice(0, Math.min(3, others.length));
+            console.log(`[6/6] 随机切换 ${shuffled.length} 个标签: ${shuffled.map(s => s.title).join(' | ') || '(无更多会话)'}`);
+            for (const s of shuffled) {
+                const rsText = extractText(await client.callTool({ name: 'select_tab', arguments: { sessionId: s.sessionId } }));
+                let rs = null;
+                try { rs = JSON.parse(rsText); } catch { /* 保持 null */ }
+                if (!rs || rs.success !== true) {
+                    console.error(`  ✗ FAIL: 随机切换 ${s.title} 未 success: ${rsText}`);
+                    failed = true;
+                    continue;
+                }
+                const sessionsN = await getSessions(client);
+                const focusedN = sessionsN.filter(x => x.isFocusedPane === true);
+                const tN = sessionsN.find(x => x.sessionId === s.sessionId);
+                const okN = focusedN.length === 1 && tN && tN.isFocusedPane === true;
+                console.log(`  → ${s.title}: isFocusedPane ${focusedN.length} 个 ${okN ? '✓' : '✗'}${okN ? '' : ` (实际: ${focusedN.map(x => x.title).join(', ')})`}`);
+                if (!okN) {
+                    console.error(`  ✗ FAIL: 随机切换 ${s.title} 后聚焦未唯一迁移`);
+                    failed = true;
+                }
+            }
+            // 7) 随机多切后 exec_command 无 locator → 应落在最后一个随机目标
+            if (shuffled.length > 0) {
+                const last = shuffled[shuffled.length - 1];
+                console.log(`[7/7] 随机多切后 exec_command 无 locator → 应落在 ${last.title}`);
+                r = await execHostname(client, {});
+                console.log(`  → ${(r.raw || '').slice(0, 160)}`);
+                if (r.parsed && r.parsed.sessionId && r.parsed.sessionId !== last.sessionId) {
+                    console.error(`  ✗ FAIL: 期望落在 ${last.sessionId}, 实际 ${r.parsed.sessionId}`);
+                    failed = true;
+                } else if (r.parsed && r.parsed.error) {
+                    console.error(`  ✗ FAIL: ${r.parsed.error}`);
+                    failed = true;
+                } else {
+                    console.log('  ✓ 随机多切后定位正确（fallback 认 activeTab）');
+                }
+            }
+
+            // 8) 恢复现场：切回原聚焦会话（避免测试改变用户聚焦状态）
+            if (original && original.sessionId !== target.sessionId) {
+                console.log(`[恢复] select_tab 切回 → ${original.title}`);
+                const restText = extractText(await client.callTool({ name: 'select_tab', arguments: { sessionId: original.sessionId } }));
+                const rest = (() => { try { return JSON.parse(restText); } catch { return null; } })();
+                if (!rest || rest.success !== true) {
+                    console.error(`  ⚠ 恢复失败: ${restText}`);
+                }
+            } else if (!original) {
+                console.log('[恢复] 无原聚焦会话，跳过恢复');
             }
         }
     } finally {
