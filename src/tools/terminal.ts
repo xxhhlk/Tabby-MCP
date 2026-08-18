@@ -318,7 +318,19 @@ export class TerminalToolCategory extends BaseToolCategory {
 
         // If no locator parameters provided, return the currently active session
         if (!locator.sessionId && !locator.tabId && locator.tabIndex === undefined && !locator.title && !locator.profileName) {
-            // First try to find the focused pane in a split
+            // Prefer the globally focused tab (select_tab sets this). This must be checked
+            // BEFORE isFocusedPane: in a multi-split layout getFocusedTab() is per-split,
+            // so multiple panes can claim isFocusedPane=true and the first array hit may
+            // not be the tab the user actually focused.
+            const activeTab = this.app.activeTab;
+            if (activeTab) {
+                const activeSession = sessions.find(s => s.tab === activeTab || s.tabParent === activeTab);
+                if (activeSession) {
+                    this.logger.debug(`findSessionByLocator: no locator provided, using globally active tab ${activeTab.title}`);
+                    return activeSession;
+                }
+            }
+            // Fallback: focused pane within the active split
             const focusedSession = sessions.find(s => s.isFocusedPane === true);
             if (focusedSession)
                 return focusedSession;
@@ -1241,7 +1253,12 @@ After focusing, commands sent to that split tab will go to the focused pane.`,
                         splitTabIndex: appTabIndex,
                         paneIndex: paneIdx,
                         totalPanes: totalPanes,
-                        isFocusedPane: childTab === focusedTab
+                        // isFocusedPane must be globally unique: getFocusedTab() returns the
+                        // per-split focused pane even when this split window is NOT the active
+                        // tab, so without the activeTab check multiple splits would each claim
+                        // isFocusedPane=true and locator fallback would pick the first in array
+                        // order (wrong tab in multi-split layouts).
+                        isFocusedPane: (this.app.activeTab === splitTab) && (childTab === focusedTab)
                     });
                 });
             }
