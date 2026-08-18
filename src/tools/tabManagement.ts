@@ -166,11 +166,26 @@ export class TabManagementToolCategory extends BaseToolCategory {
             this.logger.debug(`Tab not found by tabId: ${locator.tabId}`);
         }
         // Priority 1.5: sessionId (stable, interchangeable with tabId via terminal session lookup)
+        // NOTE: do NOT call terminalTools.findSessionByLocator here - the two categories have a
+        // circular DI dependency (forwardRef) and the injected terminalTools instance may lack
+        // prototype methods at runtime ("findSessionByLocator is not a function"). getOrCreateSessionId
+        // uses the same id registry, so matching sessionId against every terminal tab/pane is equivalent.
         if (locator.sessionId) {
-            const session = this.terminalTools.findSessionByLocator({ sessionId: locator.sessionId });
-            if (session) {
-                this.logger.debug(`Found tab by sessionId: ${locator.sessionId}`);
-                return session.tabParent;
+            for (const t of this.app.tabs) {
+                if (t instanceof BaseTerminalTabComponent) {
+                    if (this.terminalTools.getOrCreateSessionId(t) === locator.sessionId) {
+                        this.logger.debug(`Found tab by sessionId: ${locator.sessionId}`);
+                        return t;
+                    }
+                } else if (t instanceof SplitTabComponent) {
+                    for (const child of t.getAllTabs()) {
+                        if (child instanceof BaseTerminalTabComponent &&
+                            this.terminalTools.getOrCreateSessionId(child) === locator.sessionId) {
+                            this.logger.debug(`Found tab by sessionId (split pane): ${locator.sessionId}`);
+                            return t; // 返回父 split tab，聚焦整个窗口
+                        }
+                    }
+                }
             }
             this.logger.debug(`Tab not found by sessionId: ${locator.sessionId}`);
         }
