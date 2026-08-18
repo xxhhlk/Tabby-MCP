@@ -151,12 +151,11 @@ async function cmdRegress() {
             console.log(`[3/5] exec_command(hostname) 带 sessionId 定位 → ${target.title}`);
             let r = await execHostname(client, { sessionId: target.sessionId });
             console.log(`  → ${(r.raw || '').slice(0, 160)}`);
-            if (r.parsed && r.parsed.sessionId && r.parsed.sessionId !== target.sessionId) {
-                console.error(`  ✗ FAIL: 期望执行于 ${target.sessionId}, 实际 ${r.parsed.sessionId}`);
+            if (!r.parsed || r.parsed.sessionId !== target.sessionId) {
+                console.error(`  ✗ FAIL: 期望执行于 ${target.sessionId}, 实际 ${r.parsed ? r.parsed.sessionId : '无响应/解析失败'}`);
                 failed = true;
-            } else if (r.parsed && r.parsed.error) {
-                console.error(`  ✗ FAIL: ${r.parsed.error}`);
-                failed = true;
+            } else if (r.parsed.error) {
+                console.warn(`  ⚠ 定位正确（sessionId 匹配），但命令执行报错: ${r.parsed.error}`);
             } else {
                 console.log('  ✓ 定位正确');
             }
@@ -185,12 +184,11 @@ async function cmdRegress() {
                     console.log(`[5/5] exec_command(hostname) 无 locator → 应落在 ${target.title}`);
                     r = await execHostname(client, {});
                     console.log(`  → ${(r.raw || '').slice(0, 160)}`);
-                    if (r.parsed && r.parsed.sessionId && r.parsed.sessionId !== target.sessionId) {
-                        console.error(`  ✗ FAIL: 期望落在 ${target.sessionId}, 实际 ${r.parsed.sessionId}`);
+                    if (!r.parsed || r.parsed.sessionId !== target.sessionId) {
+                        console.error(`  ✗ FAIL: 期望落在 ${target.sessionId}, 实际 ${r.parsed ? r.parsed.sessionId : '无响应/解析失败'}`);
                         failed = true;
-                    } else if (r.parsed && r.parsed.error) {
-                        console.error(`  ✗ FAIL: ${r.parsed.error}`);
-                        failed = true;
+                    } else if (r.parsed.error) {
+                        console.warn(`  ⚠ 定位正确，但命令执行报错: ${r.parsed.error}`);
                     } else {
                         console.log('  ✓ 无 locator 落在切换后的目标（fallback 认 activeTab）');
                     }
@@ -199,12 +197,11 @@ async function cmdRegress() {
                     console.log(`[5.5] exec_command(hostname) 带 tabId 定位 → 应落在 ${target.title}`);
                     r = await execHostname(client, { tabId: target.tabId });
                     console.log(`  → ${(r.raw || '').slice(0, 160)}`);
-                    if (r.parsed && r.parsed.sessionId && r.parsed.sessionId !== target.sessionId) {
-                        console.error(`  ✗ FAIL: 期望落在 ${target.sessionId}, 实际 ${r.parsed.sessionId}`);
+                    if (!r.parsed || r.parsed.sessionId !== target.sessionId) {
+                        console.error(`  ✗ FAIL: 期望落在 ${target.sessionId}, 实际 ${r.parsed ? r.parsed.sessionId : '无响应/解析失败'}`);
                         failed = true;
-                    } else if (r.parsed && r.parsed.error) {
-                        console.error(`  ✗ FAIL: ${r.parsed.error}`);
-                        failed = true;
+                    } else if (r.parsed.error) {
+                        console.warn(`  ⚠ 定位正确，但命令执行报错: ${r.parsed.error}`);
                     } else {
                         console.log('  ✓ 切换后带 tabId 定位正确');
                     }
@@ -240,12 +237,11 @@ async function cmdRegress() {
                 console.log(`[7/7] 随机多切后 exec_command 无 locator → 应落在 ${last.title}`);
                 r = await execHostname(client, {});
                 console.log(`  → ${(r.raw || '').slice(0, 160)}`);
-                if (r.parsed && r.parsed.sessionId && r.parsed.sessionId !== last.sessionId) {
-                    console.error(`  ✗ FAIL: 期望落在 ${last.sessionId}, 实际 ${r.parsed.sessionId}`);
+                if (!r.parsed || r.parsed.sessionId !== last.sessionId) {
+                    console.error(`  ✗ FAIL: 期望落在 ${last.sessionId}, 实际 ${r.parsed ? r.parsed.sessionId : '无响应/解析失败'}`);
                     failed = true;
-                } else if (r.parsed && r.parsed.error) {
-                    console.error(`  ✗ FAIL: ${r.parsed.error}`);
-                    failed = true;
+                } else if (r.parsed.error) {
+                    console.warn(`  ⚠ 定位正确，但命令执行报错: ${r.parsed.error}`);
                 } else {
                     console.log('  ✓ 随机多切后定位正确（fallback 认 activeTab）');
                 }
