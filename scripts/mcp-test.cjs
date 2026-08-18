@@ -19,6 +19,7 @@
  *        3. exec_command 带 sessionId 定位正确性
  *        4. select_tab 切换聚焦 → 验证 isFocusedPane 迁移且唯一
  *        5. exec_command 不带 locator → 验证落在刚切换的会话（fallback 认 activeTab）
+ *        5.5 exec_command 带 tabId → 验证切换后带定位信息也落在目标
  *        6. 随机多切 3 个标签，逐个验证聚焦唯一迁移
  *        7. 随机多切后 exec_command 无 locator → 落在最后一个随机目标
  *        最后自动恢复原聚焦会话（不改变你的界面状态）
@@ -192,6 +193,20 @@ async function cmdRegress() {
                         failed = true;
                     } else {
                         console.log('  ✓ 无 locator 落在切换后的目标（fallback 认 activeTab）');
+                    }
+
+                    // 5.5) 切换后 exec 带 tabId 定位 → 也应落在 target（定位信息与切换状态兼容）
+                    console.log(`[5.5] exec_command(hostname) 带 tabId 定位 → 应落在 ${target.title}`);
+                    r = await execHostname(client, { tabId: target.tabId });
+                    console.log(`  → ${(r.raw || '').slice(0, 160)}`);
+                    if (r.parsed && r.parsed.sessionId && r.parsed.sessionId !== target.sessionId) {
+                        console.error(`  ✗ FAIL: 期望落在 ${target.sessionId}, 实际 ${r.parsed.sessionId}`);
+                        failed = true;
+                    } else if (r.parsed && r.parsed.error) {
+                        console.error(`  ✗ FAIL: ${r.parsed.error}`);
+                        failed = true;
+                    } else {
+                        console.log('  ✓ 切换后带 tabId 定位正确');
                     }
                 }
             }
