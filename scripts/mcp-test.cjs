@@ -6,19 +6,19 @@
  *       用于回归测试会话定位、聚焦状态等逻辑（如 isFocusedPane 唯一性、exec_command 定位）。
  *
  * 用法：
- *   node scripts/mcp-test.cjs list [--port 3001]
+ *   node scripts/mcp-test.cjs list [--port 34266]
  *      列出服务器全部工具
- *   node scripts/mcp-test.cjs call <toolName> '<jsonArgs>' [--port 3001]
+ *   node scripts/mcp-test.cjs call <toolName> '<jsonArgs>' [--port 34266]
  *      调用工具。示例：
  *        node scripts/mcp-test.cjs call get_session_list '{}'
  *        node scripts/mcp-test.cjs call exec_command '{"command":"hostname","sessionId":"<id>"}'
- *   node scripts/mcp-test.cjs regress [--port 3001]
+ *   node scripts/mcp-test.cjs regress [--port 34266]
  *      回归测试：isFocusedPane 唯一性 + exec_command 定位正确性（非零退出码 = 失败）
  *
  * 依赖：仓库 node_modules 中的 @modelcontextprotocol/sdk（Node >= 22，自带 fetch）
  *
  * 备选现成工具（官方，无需写代码）：MCP Inspector
- *   npx @modelcontextprotocol/inspector --cli http://localhost:3001/mcp --transport http \
+ *   npx @modelcontextprotocol/inspector --cli http://localhost:34266/mcp --transport http \
  *     --method tools/call --tool-name exec_command \
  *     --tool-arg command=hostname --tool-arg sessionId=<id> --format json
  */
@@ -29,7 +29,7 @@ const { StreamableHTTPClientTransport } = require('@modelcontextprotocol/sdk/cli
 const argv = process.argv.slice(2);
 const cmd = argv.find(a => !a.startsWith('--')) || 'list';
 const portIdx = argv.indexOf('--port');
-const PORT = portIdx !== -1 ? parseInt(argv[portIdx + 1], 10) : 3001;
+const PORT = portIdx !== -1 ? parseInt(argv[portIdx + 1], 10) : 34266;
 const SERVER_URL = `http://localhost:${PORT}/mcp`;
 
 // ---------- 连接 ----------
@@ -42,7 +42,7 @@ async function connect() {
         console.error(`连接失败: ${SERVER_URL}`);
         console.error(`  原因: ${e.message || e}`);
         console.error(`  检查: 1) Tabby 是否已启动并启用了 MCP server`);
-        console.error(`        2) MCP 端口是否正确（Tabby 设置 → MCP → Port，默认 3001），用 --port <端口> 指定`);
+        console.error(`        2) MCP 端口是否正确（Tabby 设置 → MCP → Port，本机默认 34266），用 --port <端口> 指定`);
         console.error(`        3) 可用 netstat -ano | findstr LISTENING 确认端口`);
         process.exit(2);
     }
