@@ -1,4 +1,4 @@
-import { Injectable, Inject, forwardRef } from '@angular/core';
+import { Injectable, Injector } from '@angular/core';
 import { AppService, BaseTabComponent, ConfigService, SplitTabComponent, ProfilesService } from 'tabby-core';
 import { BaseTerminalTabComponent } from 'tabby-terminal';
 import { z } from 'zod';
@@ -26,10 +26,24 @@ export class TabManagementToolCategory extends BaseToolCategory {
         logger: McpLoggerService,
         private config: ConfigService,
         private profilesService: ProfilesService,
-        @Inject(forwardRef(() => TerminalToolCategory)) private terminalTools: TerminalToolCategory
+        private injector: Injector
     ) {
         super(logger);
         this.initializeTools();
+    }
+
+    // Lazy-resolve TerminalToolCategory via Injector to break the circular constructor
+    // dependency between the two categories. forwardRef only fixes declaration order,
+    // NOT constructor-level cycles: the instance injected during construction ends up
+    // missing prototype methods at runtime ("findSessionByLocator is not a function",
+    // "getOrCreateSessionId is not a function"). By the time any tool handler runs DI
+    // has finished, so injector.get() returns the fully constructed instance.
+    private _terminalTools: TerminalToolCategory | null = null;
+    private get terminalTools(): TerminalToolCategory {
+        if (!this._terminalTools) {
+            this._terminalTools = this.injector.get(TerminalToolCategory);
+        }
+        return this._terminalTools;
     }
 
     private initializeTools(): void {
