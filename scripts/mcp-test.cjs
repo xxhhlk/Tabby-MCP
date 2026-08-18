@@ -22,6 +22,10 @@
  *        6. 随机多切 3 个标签，逐个验证聚焦唯一迁移
  *        7. 随机多切后 exec_command 无 locator → 落在最后一个随机目标
  *        最后自动恢复原聚焦会话（不改变你的界面状态）
+ *   node scripts/mcp-test.cjs verify [--port 34266]
+ *      全面验证（10 步）：list_tabs 互通字段、exec_command 四种定位方式
+ *      （sessionId/tabId/title/tabIndex）、无效 sessionId 错误行为、get_terminal_buffer、
+ *      select_tab(tabId) 聚焦迁移；末尾恢复原聚焦会话
  *
  * 依赖：仓库 node_modules 中的 @modelcontextprotocol/sdk（Node >= 22，自带 fetch）
  *
@@ -254,6 +258,93 @@ async function cmdRegress() {
     console.log('\n=== 回归结果: PASS ===');
 }
 
+// ---------- verify（全面验证修改过的定位/互通逻辑） ----------
+async function cmdVerify() {
+    let failed = false;
+    const client = await connect();
+    try {
+        const { tools } = await client.listTools();
+        console.log(`[1/10] tools/list → ${tools.length} 个工具`);
+
+        // 2) list_tabs 互通字段（Injector 修复后不得报错）
+        const ltText = extractText(await client.callTool({ name: 'list_tabs', arguments: {} }));
+        const lt = JSON.parse(ltText);
+        const okLt = lt.success === true && typeof lt.serverInstanceId === 'string' && Array.isArray(lt.tabs);
+        console.log(`[2/10] list_tabs → success=${lt.success}, serverInstanceId=${lt.serverInstanceId}, count=${lt.tabs ? lt.tabs.length : '-'} ${okLt ? '✓' : '✗'}`);
+        if (!okLt) { console.error('  ✗ FAIL: list_tabs 结构异常'); failed = true; }
+        else if (lt.tabs.some(t => !t.tabId)) { console.error('  ✗ FAIL: 存在缺 tabId 的 tab'); failed = true; }
+
+        // 3) get_session_list 取目标会话
+        const sessions = await getSessions(client);
+        if (!sessions.length) { console.error('  ✗ SKIP: 无会话'); failed = true; }
+        else {
+            const t = sessions[0];
+            console.log(`[3/10] get_session_list 目标: ${t.title} (sessionId=${t.sessionId}, tabId=${t.tabId}, tabIndex=${t.tabIndex})`);
+            if (!t.sessionId || !t.tabId) { console.error('  ✗ FAIL: 会话缺 sessionId/tabId'); failed = true; }
+
+            // 4-7) exec_command 四种定位方式
+            const ways = [
+                ['sessionId', { sessionId: t.sessionId }],
+                ['tabId', { tabId: t.tabId }],
+                ['title', { title: t.title }],
+                ['tabIndex', { tabIndex: t.tabIndex }]
+            ];
+            for (let i = 0; i < ways.length; i++) {
+                const [label, loc] = ways[i];
+                const r = await execHostname(client, loc);
+                const ok = r.parsed && r.parsed.sessionId === t.sessionId;
+                console.log(`[${4 + i}/10] exec_command 按 ${label} 定位 → ${ok ? '✓' : '✗'} ${(r.raw || '').slice(0, 90)}`);
+                if (!ok) { console.error(`  ✗ FAIL: ${label} 定位错误`); failed = true; }
+            }
+
+            // 8) 无效 sessionId：必须报错，绝不 fallback
+            console.log('[8/10] exec_command 无效 sessionId（应报错不 fallback）');
+            const bad = await execHostname(client, { sessionId: '00000000-0000-4000-8000-000000000000' });
+            const okBad = bad.parsed && bad.parsed.success === false && /No matching terminal session/.test(bad.parsed.error || '');
+            console.log(`  → ${(bad.raw || '').slice(0, 120)} ${okBad ? '✓' : '✗'}`);
+            if (!okBad) { console.error('  ✗ FAIL: 无效 sessionId 未正确报错（可能静默 fallback）'); failed = true; }
+
+            // 9) get_terminal_buffer 带 sessionId（同一 locator 链路）
+            console.log('[9/10] get_terminal_buffer 带 sessionId');
+            const gtbText = extractText(await client.callTool({ name: 'get_terminal_buffer', arguments: { sessionId: t.sessionId, lastNLines: 3 } }));
+            const gtb = JSON.parse(gtbText);
+            const okGtb = gtb.success === true && gtb.sessionId === t.sessionId;
+            console.log(`  → success=${gtb.success}, sessionId=${gtb.sessionId} ${okGtb ? '✓' : '✗'}`);
+            if (!okGtb) { console.error('  ✗ FAIL: get_terminal_buffer 定位错误'); failed = true; }
+
+            // 10) select_tab 按 tabId 切换并验证聚焦迁移
+            console.log('[10/10] select_tab 按 tabId 切换聚焦');
+            const stText = extractText(await client.callTool({ name: 'select_tab', arguments: { tabId: t.tabId } }));
+            const st = JSON.parse(stText);
+            if (!st || st.success !== true) {
+                console.error(`  ✗ FAIL: select_tab(tabId) 未 success: ${stText}`);
+                failed = true;
+            } else {
+                const s2 = await getSessions(client);
+                const t2 = s2.find(x => x.sessionId === t.sessionId);
+                const f2 = s2.filter(x => x.isFocusedPane === true);
+                const okSt = t2 && t2.isFocusedPane === true && f2.length === 1;
+                console.log(`  → 切换后 isFocusedPane ${f2.length} 个 ${okSt ? '✓' : '✗'}`);
+                if (!okSt) { console.error('  ✗ FAIL: select_tab(tabId) 后聚焦未唯一迁移'); failed = true; }
+            }
+
+            // 恢复：切回测试前的聚焦会话
+            const before = sessions.find(x => x.isFocusedPane === true);
+            if (before && before.sessionId !== t.sessionId) {
+                await client.callTool({ name: 'select_tab', arguments: { sessionId: before.sessionId } });
+                console.log(`[恢复] 切回 ${before.title}`);
+            }
+        }
+    } finally {
+        await client.close();
+    }
+    if (failed) {
+        console.error('\n=== 全面验证: FAIL ===');
+        process.exit(1);
+    }
+    console.log('\n=== 全面验证: PASS ===');
+}
+
 // ---------- 主入口 ----------
 (async () => {
     switch (cmd) {
@@ -282,8 +373,11 @@ async function cmdRegress() {
         case 'regress':
             await cmdRegress();
             break;
+        case 'verify':
+            await cmdVerify();
+            break;
         default:
-            console.error(`未知命令: ${cmd}（支持 list / call / regress）`);
+            console.error(`未知命令: ${cmd}（支持 list / call / regress / verify）`);
             process.exit(1);
     }
 })().catch(e => {
