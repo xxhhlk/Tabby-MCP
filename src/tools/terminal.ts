@@ -57,7 +57,7 @@ export class TerminalToolCategory extends BaseToolCategory {
     private _activeCommandsSubject = new BehaviorSubject<Map<string, ActiveCommand>>(new Map());
 
     // Shell type cache per session (avoids repeated detection)
-    private shellTypeCache = new Map<string, 'bash' | 'zsh' | 'fish' | 'sh'>();
+    private shellTypeCache = new Map<string, 'bash' | 'zsh' | 'fish' | 'sh' | 'powershell'>();
 
     // Command security manager (lazy initialized)
     private securityManager?: CommandSecurityManager;
@@ -149,7 +149,7 @@ export class TerminalToolCategory extends BaseToolCategory {
      * 4. Terminal title hints
      * 5. Default to 'sh' (POSIX fallback)
      */
-    private detectShellType(session: TerminalSessionWithTab): 'bash' | 'zsh' | 'fish' | 'sh' {
+    private detectShellType(session: TerminalSessionWithTab): 'bash' | 'zsh' | 'fish' | 'sh' | 'powershell' {
         // Step 1: Check cache first
         const cached = this.shellTypeCache.get(session.sessionId);
         if (cached) {
@@ -164,6 +164,25 @@ export class TerminalToolCategory extends BaseToolCategory {
         try {
             const buffer = this.getTerminalBufferText(session);
             if (buffer && buffer.length > 0) {
+                // PowerShell-specific patterns (Windows ConPTY / pwsh)
+                // - Banner: "Windows PowerShell" or "PowerShell 7.x"
+                // - Default prompt: "PS C:\Users\im>"
+                // - pwsh binary name in output
+                // NOTE: must be checked BEFORE bash patterns to avoid false matches
+                const powershellBufferPatterns = [
+                    /Windows PowerShell/i,
+                    /PowerShell \d/i,
+                    /PS [A-Za-z]:\\/,
+                    /pwsh/i,
+                ];
+                for (const pattern of powershellBufferPatterns) {
+                    if (pattern.test(buffer)) {
+                        this.logger.info(`Detected PowerShell from buffer pattern: ${pattern}`);
+                        this.shellTypeCache.set(session.sessionId, 'powershell');
+                        return 'powershell';
+                    }
+                }
+
                 // Fish-specific patterns
                 // - Welcome message: "Welcome to fish"
                 // - Error message when using $?: "fish: $? is not the exit status"
@@ -225,7 +244,13 @@ export class TerminalToolCategory extends BaseToolCategory {
         const fishPatterns = [/\bfish\b/i, /fish$/i];
         const zshPatterns = [/\bzsh\b/i, /zsh$/i];
         const bashPatterns = [/\bbash\b/i, /bash$/i];
+        const powershellPatterns = [/\bpowershell\b/i, /\bpwsh\b/i];
 
+        if (powershellPatterns.some(p => p.test(allProfileText))) {
+            this.logger.debug(`Detected PowerShell shell from profile: ${profileName}`);
+            this.shellTypeCache.set(session.sessionId, 'powershell');
+            return 'powershell';
+        }
         if (fishPatterns.some(p => p.test(allProfileText))) {
             this.logger.debug(`Detected fish shell from profile: ${profileName}`);
             this.shellTypeCache.set(session.sessionId, 'fish');
@@ -244,6 +269,11 @@ export class TerminalToolCategory extends BaseToolCategory {
 
         // Step 4: Check terminal title (last resort)
         const title = session.tab.title || '';
+        if (powershellPatterns.some(p => p.test(title))) {
+            this.logger.debug(`Detected PowerShell shell from title: ${title}`);
+            this.shellTypeCache.set(session.sessionId, 'powershell');
+            return 'powershell';
+        }
         if (fishPatterns.some(p => p.test(title))) {
             this.logger.debug(`Detected fish shell from title: ${title}`);
             this.shellTypeCache.set(session.sessionId, 'fish');
@@ -269,6 +299,21 @@ export class TerminalToolCategory extends BaseToolCategory {
 
 
     /**
+     * Line terminator used to "press Enter" when submitting a line to a terminal.
+     *
+     * Windows ConPTY maps CR (0x0D) to the Enter key; LF (0x0A) is inserted as a
+     * plain newline by PSReadLine instead of submitting the line, so commands
+     * would stall in the continuation buffer. Unix shells submit on LF (and
+     * remote sessions may run with `stty -icrnl`, where CR is NOT mapped to NL),
+     * so *nix keeps LF to avoid regressions. WSL tabs on a Windows host are safe
+     * with CR: ConPTY delivers CR and the WSL line discipline (ICRNL) converts
+     * it back to NL.
+     */
+    private getEnterKey(): string {
+        return process.platform === 'win32' ? '\r' : '\n';
+    }
+
+    /**
      * Generate shell-compatible wrapped command for output capture
      * 
      * CRITICAL: Commands are wrapped in `eval` to ensure that syntax errors
@@ -279,14 +324,24 @@ export class TerminalToolCategory extends BaseToolCategory {
      * Different shells use different syntax:
      * - bash/zsh/sh: eval '...' with single-quote escaping, $? for exit code
      * - fish: eval "..." with backslash escaping, $status for exit code
+     * - powershell: Invoke-Expression (PS 5.1 compatible, no && / eval),
+     *   exit code from $LASTEXITCODE (native exes) falling back to $? (cmdlets)
      */
     private getWrappedCommand(
         command: string,
         startMarker: string,
         endMarker: string,
-        shellType: 'bash' | 'zsh' | 'fish' | 'sh'
+        shellType: 'bash' | 'zsh' | 'fish' | 'sh' | 'powershell'
     ): string {
         switch (shellType) {
+            case 'powershell': {
+                // PowerShell (compatible with 5.1: no `&&`, no `eval`).
+                // Reset $LASTEXITCODE so stale values from previous native
+                // commands don't shadow $? of cmdlet-only failures.
+                const psEscaped = command.replace(/'/g, "''");
+                return `Write-Output "${startMarker}"; $mcp_ec = 0; try { $global:LASTEXITCODE = 0; Invoke-Expression '${psEscaped}'; if ($LASTEXITCODE -ne 0) { $mcp_ec = $LASTEXITCODE } elseif (-not $?) { $mcp_ec = 1 } } catch { $mcp_ec = 1 }; Write-Output "${endMarker} $mcp_ec"`;
+            }
+
             case 'fish':
                 // Fish shell: use $status instead of $?, eval with double quotes
                 // Fish escaping: \ escapes " and \ inside double quotes
@@ -601,7 +656,7 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
                     // Send command with markers - use shell-aware wrapper
                     const detectedShell = this.detectShellType(session);
                     const wrappedCommand = this.getWrappedCommand(command, startMarker, endMarker, detectedShell);
-                    session.tab.sendInput(wrappedCommand + '\n');
+                    session.tab.sendInput(wrappedCommand + this.getEnterKey());
 
                     this.logger.info(`Executing command: ${command} in session ${session.sessionId} (shell: ${detectedShell}, stream: ${!!outputStream$})`);
 
@@ -970,6 +1025,11 @@ Session targeting: sessionId > tabId > tabIndex > title > profileName`,
         }
 
         const shell = this.detectShellType(session);
+        // The probe command is POSIX-only (printf / [ -n ... ]). On PowerShell it
+        // would type garbage into the terminal and always fail, so short-circuit.
+        if (shell === 'powershell') {
+            return { environment: 'powershell', isShell: true };
+        }
         const command = `printf '__MCP_ENV__:'; if [ -n "$VIRTUAL_ENV" ]; then printf 'python-venv'; elif [ -n "$CONDA_DEFAULT_ENV" ]; then printf 'python-conda'; elif [ -n "$IN_NIX_SHELL" ]; then printf 'nix-shell'; else printf 'shell'; fi; printf ':__MCP_ENV__'`;
 
         try {
@@ -1348,7 +1408,7 @@ After focusing, commands sent to that split tab will go to the focused pane.`,
 
             // Look for end marker with exit code pattern (complete marker)
             // End marker format: __MCP_END_<timestamp>__ <exit_code>
-            const endPattern = new RegExp(`${endMarker}\\s+(\\d+)`, 'm');
+            const endPattern = new RegExp(`${endMarker}\\s+(-?\\d+)`, 'm');
             const endMatch = buffer.match(endPattern);
 
             if (endMatch) {
