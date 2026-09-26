@@ -475,6 +475,9 @@ For split panes:
                         title: s.tab.title || `Terminal ${s.tabIndex}`,
                         type: s.tab.constructor.name,
                         isActive: this.app.activeTab === s.tabParent,
+                        // false => restored/cold tab: Tabby has not created the session yet
+                        // (it does so lazily on focus), so input cannot be delivered.
+                        sessionLive: this.isSessionWritable(s),
                         hasActiveCommand: this._activeCommands.has(s.sessionId),
                         profile: tabAny.profile ? {
                             id: tabAny.profile.id,
@@ -594,17 +597,38 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
                     // Focus terminal ONLY if background execution is disabled
                     // Background mode allows AI to work on tabs without disturbing user's current focus
                     const backgroundMode = this.config.store.mcp?.backgroundExecution?.enabled ?? false;
+                    let activated = false;
                     if (!backgroundMode) {
-                        this.app.selectTab(session.tabParent);
-                        // For split panes, also focus the specific pane
-                        if (session.isSplit && session.tabParent instanceof SplitTabComponent) {
-                            (session.tabParent as SplitTabComponent).focus(session.tab);
-                        }
+                        this.activateTab(session);
+                        activated = true;
                     }
+
+                    // A restored ("cold") tab has NO session yet: Tabby creates it
+                    // lazily in onFrontendReady() -> initializeSession(), which only
+                    // runs once the tab gets focus. sendInput() before that is a silent
+                    // no-op (`this.session?.write()` / SSHShellSession.write() with a
+                    // null shell), which showed up as "Tabby reconnected, but the
+                    // command never ran". Wait for a writable session before sending.
+                    const live = await this.ensureSessionLive(session, activated);
+                    if (!live.ok) {
+                        return {
+                            content: [{
+                                type: 'text', text: JSON.stringify({
+                                    success: false,
+                                    sessionId: session.sessionId,
+                                    error: live.error,
+                                    waitedMs: live.waitedMs,
+                                    ...(noLocatorWarning ? { warning: noLocatorWarning } : {}),
+                                    hint: 'The tab was restored on startup but its session never became writable (SSH auth prompt? host unreachable?). Inspect/reconnect the tab in Tabby, then retry.'
+                                })
+                            }]
+                        };
+                    }
+                    const activationInfo = live.activated ? { activatedTab: true, activationWaitMs: live.waitedMs } : {};
 
                     // For non-waiting mode, just send the command
                     if (!waitForOutput) {
-                        session.tab.sendInput(command + '\n');
+                        session.tab.sendInput(command + this.getEnterKey());
                         this.logger.info(`Sent command (async): ${command} in session ${session.sessionId}`);
                         return {
                             content: [{
@@ -613,6 +637,7 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
                                     sessionId: session.sessionId,
                                     message: 'Command sent (not waiting for output)',
                                     hint: 'Use get_terminal_buffer with same sessionId to check output',
+                                    ...activationInfo,
                                     ...(noLocatorWarning ? { warning: noLocatorWarning } : {})
                                 })
                             }]
@@ -678,7 +703,7 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
                     this._activeCommandsSubject.next(new Map(this._activeCommands));
 
                     // Add sessionId to result for reference
-                    const resultWithSession = { ...result, sessionId: session.sessionId, ...(noLocatorWarning ? { warning: noLocatorWarning } : {}) };
+                    const resultWithSession = { ...result, sessionId: session.sessionId, ...activationInfo, ...(noLocatorWarning ? { warning: noLocatorWarning } : {}) };
                     return { content: [{ type: 'text', text: JSON.stringify(resultWithSession) }] };
                 } catch (error: any) {
                     this._activeCommands.delete(session.sessionId);
@@ -705,6 +730,12 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
         // NOTE: tab.destroyed is a Subject<void>, NOT a boolean! Only check session.open
         this.logger.debug(`[ensureSessionValid] Checking session ${session.sessionId}: hasSession=${!!sessionObj}, sessionOpen=${sessionObj?.open}`);
 
+        if (!sessionObj) {
+            // Cold/restored tab: Tabby has not created the session yet (it does so
+            // on first focus). ensureSessionLive() handles activation + waiting.
+            this.logger.warn(`[ensureSessionValid] Session ${session.sessionId} has no session object (restored tab never focused)`);
+        }
+
         if (sessionObj && sessionObj.open === false) {
             this.logger.warn(`[ensureSessionValid] Session ${session.sessionId} disconnected: session.open=false`);
 
@@ -722,6 +753,90 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
             // Just warn for now.
             // throw new Error(`Session ${session.sessionId} is disconnected or tab is closed`);
         }
+    }
+
+    /**
+     * Can this tab's session accept input right now?
+     *
+     * `false` covers two cases that both silently swallow input:
+     * 1. `session === null` - restored tab whose frontend has never been attached
+     *    (Tabby creates the session in onFrontendReady(), i.e. only on focus).
+     * 2. `session.open === false` - session exists but is not connected yet
+     *    (SSH: setSession() runs before the awaited session.start()).
+     *
+     * `sendInput()` is `this.session?.write(data)` and SSHShellSession.write() is
+     * `if (this.shell) ...`, so both cases drop the data without any error.
+     */
+    private isSessionWritable(session: TerminalSessionWithTab): boolean {
+        const sessionObj = (session.tab as any).session;
+        if (!sessionObj) {
+            return false;
+        }
+        // `open` is set to false in the BaseSession constructor and flipped to true
+        // in start(); treat an unknown value as writable to avoid false negatives
+        // for session types that do not expose it.
+        return sessionObj.open !== false;
+    }
+
+    /**
+     * Focus a tab (and its pane, when inside a split).
+     */
+    private activateTab(session: TerminalSessionWithTab): void {
+        if (this.app.activeTab !== session.tabParent) {
+            this.app.selectTab(session.tabParent);
+        }
+        if (session.isSplit && session.tabParent instanceof SplitTabComponent) {
+            (session.tabParent as SplitTabComponent).focus(session.tab);
+        }
+    }
+
+    /**
+     * Guarantee the target session can receive input, activating the tab first
+     * when it is still cold (restored but never focused).
+     *
+     * NOTE: activation is mandatory in that case and therefore overrides
+     * background execution mode - the frontend is attached only on focus, so
+     * without it the session would never be created and the command could never
+     * run at all.
+     */
+    private async ensureSessionLive(
+        session: TerminalSessionWithTab,
+        alreadyActivated: boolean
+    ): Promise<{ ok: boolean; activated: boolean; waitedMs: number; error?: string }> {
+        if (this.isSessionWritable(session)) {
+            return { ok: true, activated: alreadyActivated, waitedMs: 0 };
+        }
+
+        const timing = this.config.store.mcp?.timing || {};
+        const pollInterval = timing.sessionPollInterval ?? 200;
+        const timeout = timing.sessionActivationTimeout ?? 20000;
+        const started = Date.now();
+
+        this.logger.warn(
+            `[ensureSessionLive] Session ${session.sessionId} has no writable session (restored/cold tab) - ` +
+            `activating tab and waiting up to ${timeout}ms for it to connect`
+        );
+        this.activateTab(session);
+
+        while (Date.now() - started < timeout) {
+            if (this.isSessionWritable(session)) {
+                const waitedMs = Date.now() - started;
+                this.logger.info(`[ensureSessionLive] Session ${session.sessionId} became writable after ${waitedMs}ms`);
+                return { ok: true, activated: true, waitedMs };
+            }
+            // Re-assert activation: the tab could have been switched away while waiting.
+            this.activateTab(session);
+            await new Promise(resolve => setTimeout(resolve, pollInterval));
+        }
+
+        const waitedMs = Date.now() - started;
+        this.logger.error(`[ensureSessionLive] Session ${session.sessionId} never became writable (${waitedMs}ms)`);
+        return {
+            ok: false,
+            activated: true,
+            waitedMs,
+            error: `Session not writable after ${waitedMs}ms: the tab was restored on startup but its session never connected (no session object / session.open=false).`
+        };
     }
 
     /**
@@ -763,6 +878,23 @@ Special keys: \\x03 (Ctrl+C), \\x04 (Ctrl+D), \\x1b (Escape), \\r (Enter)`,
                 } catch (error: any) {
                     return {
                         content: [{ type: 'text', text: JSON.stringify({ success: false, error: error.message }) }]
+                    };
+                }
+
+                // Restored tabs have no live session until they are focused, and
+                // sendInput() drops data silently in that state - activate and wait.
+                const live = await this.ensureSessionLive(session, false);
+                if (!live.ok) {
+                    return {
+                        content: [{
+                            type: 'text', text: JSON.stringify({
+                                success: false,
+                                sessionId: session.sessionId,
+                                error: live.error,
+                                waitedMs: live.waitedMs,
+                                hint: 'Input was NOT sent. Inspect/reconnect the tab in Tabby, then retry.'
+                            })
+                        }]
                     };
                 }
 

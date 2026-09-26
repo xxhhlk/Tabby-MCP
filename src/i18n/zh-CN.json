@@ -102,6 +102,8 @@
     "mcp.timing.sessionStableChecks.desc": "会话就绪检测的稳定检查次数（默认：5）",
     "mcp.timing.sessionPollInterval": "会话轮询间隔（毫秒）",
     "mcp.timing.sessionPollInterval.desc": "会话就绪轮询的间隔（默认：200）",
+    "mcp.timing.sessionActivationTimeout": "冷标签激活等待上限（毫秒）",
+    "mcp.timing.sessionActivationTimeout.desc": "恢复但未激活的标签，等待其创建并连接会话的最长时间，超时则命令失败（默认：20000）",
     "mcp.connectionInfo.title": "连接信息",
     "mcp.connectionInfo.streamable": "Streamable HTTP（推荐）：",
     "mcp.connectionInfo.legacySse": "Legacy SSE：",

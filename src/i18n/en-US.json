@@ -102,6 +102,8 @@
     "mcp.timing.sessionStableChecks.desc": "Number of stable checks for session ready detection (default: 5)",
     "mcp.timing.sessionPollInterval": "Session Poll Interval (ms)",
     "mcp.timing.sessionPollInterval.desc": "Interval for session ready polling (default: 200)",
+    "mcp.timing.sessionActivationTimeout": "Cold Tab Activation Timeout (ms)",
+    "mcp.timing.sessionActivationTimeout.desc": "How long to wait for a restored (not yet focused) tab to create and connect its session before failing the command (default: 20000)",
     "mcp.connectionInfo.title": "Connection Info",
     "mcp.connectionInfo.streamable": "Streamable HTTP (Recommended):",
     "mcp.connectionInfo.legacySse": "Legacy SSE:",
