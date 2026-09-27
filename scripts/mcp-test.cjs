@@ -24,26 +24,41 @@
  *        7. 随机多切后 exec_command 无 locator → 落在最后一个随机目标
  *        最后自动恢复原聚焦会话（不改变你的界面状态）
  *   node scripts/mcp-test.cjs verify [--port 34266]
- *      全面验证（10 步）：list_tabs 互通字段、exec_command 四种定位方式
+ *      全面验证（10 步 + 4 项新增能力）：list_tabs 互通字段、exec_command 四种定位方式
  *      （sessionId/tabId/title/tabIndex）、无效 sessionId 错误行为、get_terminal_buffer、
- *      select_tab(tabId) 聚焦迁移；末尾恢复原聚焦会话
+ *      select_tab(tabId) 聚焦迁移；末尾恢复原聚焦会话。
+ *      另有 v1.7.1 新增能力检查：
+ *        H1 submit_keyboard_interactive_response 无 prompt → 拒绝分支
+ *        H2 GET /health 返回 instanceId
+ *        H3 POST /api/tool/:name 默认关闭（404）
+ *        H4 127.0.0.1 连通性（并记录 localhost 可达性）
+ *
+ * 注意（审批会阻塞自动化）：
+ *   结对编程模式开启且勾选确认时，exec_command / send_input / SFTP 操作会弹出确认框，
+ *   无人点按会在 120 秒后自动拒绝。跑 regress / verify 前请确保
+ *   Tabby 设置 → MCP → 结对编程模式 关闭（或至少取消「确认 SFTP 操作」），
+ *   否则用例会因「用户拒绝」而失败。hostname 等只读命令在默认安全策略下自动放行。
  *
  * 依赖：仓库 node_modules 中的 @modelcontextprotocol/sdk（Node >= 22，自带 fetch）
  *
  * 备选现成工具（官方，无需写代码）：MCP Inspector
- *   npx @modelcontextprotocol/inspector --cli http://localhost:34266/mcp --transport http \
+ *   npx @modelcontextprotocol/inspector --cli http://127.0.0.1:34266/mcp --transport http \
  *     --method tools/call --tool-name exec_command \
  *     --tool-arg command=hostname --tool-arg sessionId=<id> --format json
  */
 const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
 const { StreamableHTTPClientTransport } = require('@modelcontextprotocol/sdk/client/streamableHttp.js');
+const http = require('http');
 
 // ---------- 参数解析 ----------
 const argv = process.argv.slice(2);
 const cmd = argv.find(a => !a.startsWith('--')) || 'list';
 const portIdx = argv.indexOf('--port');
 const PORT = portIdx !== -1 ? parseInt(argv[portIdx + 1], 10) : 34266;
-const SERVER_URL = `http://localhost:${PORT}/mcp`;
+// 服务器只绑 127.0.0.1（见 mcpService.listenOnce）。用 localhost 在部分环境下
+// 会解析成 IPv6 ::1 而连不上，所以这里固定用 IPv4 回环地址。
+const SERVER_URL = `http://127.0.0.1:${PORT}/mcp`;
+const BASE_URL = `http://127.0.0.1:${PORT}`;
 
 // ---------- 连接 ----------
 async function connect() {
@@ -70,19 +85,91 @@ function extractText(result) {
     return JSON.stringify(result, null, 2);
 }
 
+// ---------- HTTP 直连辅助（/health、/api/tool 等非 MCP 端点） ----------
+function httpGet(path) {
+    return new Promise((resolve) => {
+        const req = http.get({ host: '127.0.0.1', port: PORT, path, timeout: 4000 }, (res) => {
+            let body = '';
+            res.on('data', c => { body += c; });
+            res.on('end', () => resolve({ status: res.statusCode, body }));
+        });
+        req.on('error', e => resolve({ status: 0, body: '', error: e.message }));
+        req.on('timeout', () => { req.destroy(); resolve({ status: 0, body: '', error: 'timeout' }); });
+    });
+}
+
+/** 探测主机是否可达（用于对比 127.0.0.1 与 localhost） */
+function probeHost(host) {
+    return new Promise((resolve) => {
+        const req = http.get({ host, port: PORT, path: '/health', timeout: 4000 }, (res) => {
+            res.resume();
+            resolve({ ok: true, status: res.statusCode });
+        });
+        req.on('error', e => resolve({ ok: false, error: e.code || e.message }));
+        req.on('timeout', () => { req.destroy(); resolve({ ok: false, error: 'timeout' }); });
+    });
+}
+
+/** POST 一个 JSON 体（用于验证 /api/tool/:name 直连端点） */
+function httpPost(path, body) {
+    return new Promise((resolve) => {
+        const payload = JSON.stringify(body || {});
+        const req = http.request({
+            host: '127.0.0.1', port: PORT, path, method: 'POST', timeout: 4000,
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
+        }, (res) => {
+            let data = '';
+            res.on('data', c => { data += c; });
+            res.on('end', () => resolve({ status: res.statusCode, body: data }));
+        });
+        req.on('error', e => resolve({ status: 0, body: '', error: e.message }));
+        req.on('timeout', () => { req.destroy(); resolve({ status: 0, body: '', error: 'timeout' }); });
+        req.write(payload);
+        req.end();
+    });
+}
+
 // ---------- list ----------
 async function cmdList() {
     const client = await connect();
+    let failed = false;
     try {
         const { tools } = await client.listTools();
         console.log(`共 ${tools.length} 个工具:`);
         for (const t of tools) {
             const firstLine = (t.description || '').split('\n')[0];
-            console.log(`  - ${t.name.padEnd(28)} ${firstLine.slice(0, 70)}`);
+            console.log(`  - ${t.name.padEnd(34)} ${firstLine.slice(0, 70)}`);
+        }
+
+        // 工具数量是「注册漏了/多了」的哨兵：源码注册 36 个
+        // （terminal 9 + tabManagement 15 + sftp 12），但 get_session_environment
+        // 默认不可见（需在设置里开启环境探测），所以 tools/list 默认返回 35。
+        const REGISTERED = 36;
+        const hiddenByDefault = 1; // get_session_environment
+        const visible = tools.length;
+        if (visible !== REGISTERED - hiddenByDefault && visible !== REGISTERED) {
+            console.error(`\n✗ FAIL: tools/list 返回 ${visible} 个，期望 ${REGISTERED - hiddenByDefault}（默认）或 ${REGISTERED}（开启环境探测后）`);
+            console.error(`        源码注册数：terminal 9 + tabManagement 15 + sftp 12 = ${REGISTERED}`);
+            failed = true;
+        } else {
+            const note = visible === REGISTERED ? '（环境探测已开启，含 get_session_environment）' : '（get_session_environment 默认隐藏）';
+            console.log(`\n✓ 工具数量 ${visible}${note}`);
+        }
+
+        const names = new Set(tools.map(t => t.name));
+        for (const required of ['submit_keyboard_interactive_response', 'get_session_list', 'exec_command', 'send_input']) {
+            if (!names.has(required)) {
+                console.error(`✗ FAIL: 缺少工具 ${required}`);
+                failed = true;
+            }
+        }
+        if (names.has('submit_keyboard_interactive_response')) {
+            console.log('✓ 含 submit_keyboard_interactive_response（SSH 键盘交互/MFA 应答）');
         }
     } finally {
         await client.close();
     }
+    if (failed) process.exit(1);
 }
 
 // ---------- call ----------
@@ -294,9 +381,17 @@ async function cmdVerify() {
         } else {
             const before = sessions.find(x => x.isFocusedPane === true);
             console.log(`[3/10] 目标会话（不同会话）: ${targets.map(x => `${x.title}[tabIndex=${x.tabIndex}]`).join(' | ')}`);
+            // 字段完整性：本地自研（tabId / serverInstanceId / sessionLive）
+            // + 上游 v1.7.1 新增（sshConnected / keyboardInteractivePending）
+            const requiredFields = ['sessionId', 'tabId', 'serverInstanceId', 'sessionLive', 'sshConnected', 'keyboardInteractivePending'];
             for (const t of targets) {
-                if (!t.sessionId || !t.tabId) { console.error('  ✗ FAIL: 会话缺 sessionId/tabId'); failed = true; }
+                const missing = requiredFields.filter(f => !(f in t));
+                if (missing.length) {
+                    console.error(`  ✗ FAIL: ${t.title} 缺字段 ${missing.join(', ')}`);
+                    failed = true;
+                }
             }
+            console.log(`  → 字段检查(${requiredFields.length}): ${requiredFields.map(f => `${f}=${JSON.stringify(targets[0][f])}`).join(', ')}`);
 
             // 4-7) exec_command 四种定位方式，各自命中不同目标会话
             const ways = [
@@ -358,6 +453,51 @@ async function cmdVerify() {
             } else if (!before) {
                 console.log('[恢复] 无原聚焦会话，跳过恢复');
             }
+        }
+
+        // ---------- 上游 v1.7.1 新增能力的检查 ----------
+        console.log('\n--- v1.7.1 新增能力 ---');
+
+        // H1) submit_keyboard_interactive_response：无 active prompt 时必须走拒绝分支
+        //     （不需要连 MFA 服务器即可验证）
+        const kipTarget = sessions.find(s => s.keyboardInteractivePending !== true) || sessions[0];
+        if (kipTarget) {
+            const kipText = extractText(await client.callTool({
+                name: 'submit_keyboard_interactive_response',
+                arguments: { sessionId: kipTarget.sessionId, response: '000000' }
+            }));
+            let kip = null;
+            try { kip = JSON.parse(kipText); } catch { /* 非 JSON */ }
+            const okKip = kip && kip.success === false && kip.keyboardInteractivePending === false
+                && /No active keyboard-interactive prompt/.test(kip.error || '');
+            console.log(`[H1] submit_keyboard_interactive_response 无 prompt → ${okKip ? '✓ 拒绝分支正确' : '✗'} ${kipText.slice(0, 110)}`);
+            if (!okKip) { console.error('  ✗ FAIL: 无 active prompt 时应返回 success=false + keyboardInteractivePending=false'); failed = true; }
+        } else {
+            console.warn('[H1] 无可用会话，跳过');
+        }
+
+        // H2) /health 必须带 instanceId（v1.7.1 新增，用于陈旧实例识别与端口移交）
+        const health = await httpGet('/health');
+        let healthJson = null;
+        try { healthJson = JSON.parse(health.body); } catch { /* 非 JSON */ }
+        const okHealth = health.status === 200 && healthJson
+            && typeof healthJson.instanceId === 'string' && healthJson.instanceId.length > 0;
+        console.log(`[H2] GET /health → status=${health.status}, instanceId=${healthJson ? healthJson.instanceId : '-'} ${okHealth ? '✓' : '✗'}`);
+        if (!okHealth) { console.error(`  ✗ FAIL: /health 未返回 instanceId（body=${String(health.body).slice(0, 120)}）`); failed = true; }
+
+        // H3) /api/tool/:name 直连端点默认关闭（directToolApi.enabled 默认 false）
+        const direct = await httpPost('/api/tool/exec_command', { command: 'hostname' });
+        const okDirect = direct.status === 404;
+        console.log(`[H3] POST /api/tool/exec_command → status=${direct.status} ${okDirect ? '✓ 默认关闭' : '✗ 期望 404'}`);
+        if (!okDirect) { console.error(`  ✗ FAIL: 直连工具 API 应默认关闭（404），实际 ${direct.status}: ${String(direct.body).slice(0, 120)}`); failed = true; }
+
+        // H4) 回环连通性：127.0.0.1 必达；localhost 仅记录（服务只绑 IPv4 回环）
+        const loop4 = await probeHost('127.0.0.1');
+        const loopName = await probeHost('localhost');
+        console.log(`[H4] 回环连通性 → 127.0.0.1: ${loop4.ok ? '✓ 可达' : '✗ ' + loop4.error} | localhost: ${loopName.ok ? '可达' : '不可达(' + loopName.error + ')'}`);
+        if (!loop4.ok) { console.error('  ✗ FAIL: 127.0.0.1 不可达'); failed = true; }
+        if (!loopName.ok) {
+            console.log('  ℹ localhost 不可达属预期（服务只绑 127.0.0.1），本脚本已固定使用 127.0.0.1');
         }
     } finally {
         await client.close();
