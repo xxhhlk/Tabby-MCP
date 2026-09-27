@@ -2,6 +2,46 @@
 
 All notable changes to Tabby-MCP will be documented in this file.
 
+## [1.7.1-fork.1] - 2026-09-28
+
+合并上游 `v1.6.2 → v1.7.1` 的全部功能改动，同时保留本地自研能力。差异说明见 README_CN「与上游的差异」。
+
+### ✨ Added
+- **`submit_keyboard_interactive_response` 工具**：应答 Tabby 的 SSH 键盘交互认证面板（MFA/TOTP、JumpServer 等）。`send_input` 只能写终端 PTY，够不到该面板。兼容新旧两种 prompt 结构。
+- **`get_session_list` 新增字段**：`sshConnected`、`keyboardInteractivePending`、`keyboardInteractivePrompt`（仅非敏感元数据）。
+- **`/health` 返回 `instanceId`**，用于识别陈旧实例。
+
+### 🔒 Security
+- **全局 Host 校验**：仅接受 `127.0.0.1` / `localhost` 且端口匹配的请求（DNS rebinding 防护）。
+- **Origin 校验统一**：`/mcp`、`/sse`、`/messages`、`/api/tool/:name` 全部接入（此前只有 `/mcp`）。
+- **`/api/tool/:name` 直连 API 默认关闭**（需 `directToolApi.enabled = true`）。
+- **服务只绑 `127.0.0.1`**：MCP 无鉴权，不应在网络其他接口上可达。
+- **SFTP 敏感操作确认**：10 个操作（list / read / write / mkdir / delete / rename / stat / upload / download / cancel）在结对编程模式下需确认；确认框展示完整 payload，不截断。
+- **键盘交互应答确认只显示响应数量**，绝不回显 TOTP / 密码。
+- `/internal/shutdown` 仅限回环 + 控制令牌。
+
+### 🔧 Fixed
+- **异常退出后重启**（上游 Issue #5）：`startServer` 改为 single-flight，`EADDRINUSE` 重试退避，检测到陈旧实例时经 `/internal/shutdown` 请求其释放端口；`stopServerInternal` 可取消在途启动。
+- **焦点与输入法**（上游 Issue #7）：原生 `confirm()` / `alert()` 改为非阻塞 DOM 对话框，关闭后恢复原焦点，xterm 键盘输入与中文输入法立即可用；`exec_command` 尊重 `autoFocusTerminal` 开关。
+- **背景审批提醒**（上游 Issue #10/#11）：窗口非前台时 Windows/Linux 闪烁任务栏并前置窗口，macOS 弹跳 Dock。
+- **SFTP 取消语义**：取消改为标记 + 只取消传输流，不再 `sftpSession.end()` 断开共享 SSH 会话；`waitForTransferComplete` 在 `finally` 中清理轮询定时器。
+- **SFTP 会话定位**：`findSSHSession` 新增 `profileName` 匹配。
+- **旧版 SSE 传输**：`/messages` 把 `express.json()` 已解析的 body 传给 SDK，避免重复读取已耗尽的流导致空 body。
+- **Streamable HTTP**：GET/DELETE 委托 SDK 处理；未知会话返回 404 `-32001`，未初始化请求返回 400 `-32000`；创建失败时清理 transport 与 server。
+- **fish 环境探测**：改用 fish 原生语法（POSIX 的 `if [ -n ... ]; then` 在 fish 中是语法错误）。
+- **设置页**：会话/传输监控弹窗全量 i18n；传输表格循环变量 `t` 遮蔽 `t()` 方法已修正；`closeSession` 不再把英文句子当 i18n 键。
+- **stdio bridge**：连接地址改 `127.0.0.1`；`connectSSE` 单飞 + 5 秒超时；不再把 POST ACK 写入 stdout（会污染 JSON-RPC 流）；统一关闭路径。
+
+### 🧰 Engineering
+- `@modelcontextprotocol/sdk` 由 `^1.8.0` 钉到 `1.25.2`（此前已漂移到 1.29.0）。
+- 新增 `scripts/smoke-test.js`（8 项静态检查）与 `typecheck` / `test` / `check` 脚本。
+- `scripts/mcp-test.cjs` 扩展：工具数量断言、`get_session_list` 字段完整性、无 prompt 时的键盘交互拒绝分支、`/health` 的 `instanceId`、直连 API 默认 404、回环连通性。
+- 移除未使用的 `cors` / `@types/cors` 依赖。
+- 全部文件行尾符统一为 LF（新增 `.gitattributes`）。
+
+### ⚠️ 行为变化
+- 无会话的 `GET` / `POST /mcp` 由本地此前的 `404 Session not found` 改为上游语义：未知会话 `404 / -32001`，缺少会话头 `400 / -32000`（符合 Streamable HTTP 规范）。
+
 ## [1.6.2] - 2026-06-06
 
 ### ✨ Added

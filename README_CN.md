@@ -14,7 +14,7 @@
 
 **Tabby 终端的全功能 MCP 服务器插件**
 
-*将 AI 助手连接到您的终端 — 34 个 MCP 工具，包含 SFTP 支持*
+*将 AI 助手连接到您的终端 — 36 个 MCP 工具，包含 SFTP 支持*
 
 [English](README.md) | [中文](README_CN.md)
 
@@ -196,24 +196,26 @@ npm run build
 
 ## 🛠️ 可用工具
 
-### 终端控制（7 个）
+### 终端控制（9 个）
 
 | 工具 | 说明 |
 |------|------|
-| `get_session_list` | 列出所有终端会话（**包含稳定 UUID**） |
+| `get_session_list` | 列出所有终端会话（**包含稳定 UUID**、`tabId`、会话存活与 SSH 认证状态） |
 | `exec_command` | 执行命令（支持多种定位方式） |
 | `send_input` | 发送交互式输入 (Ctrl+C 等) |
+| `submit_keyboard_interactive_response` | 🆕 应答 SSH 键盘交互认证（MFA/TOTP、JumpServer 等）——`send_input` 只能写终端 PTY，够不到 Tabby 的认证面板 |
 | `get_terminal_buffer` | 读取终端缓冲区（默认使用活跃会话） |
 | `abort_command` | 中止正在运行的命令 |
 | `get_command_status` | 监控活动命令状态 |
 | `focus_pane` | 聚焦分割视图中的特定窗格 |
+| `get_session_environment` | 环境探测（shell/python/mysql…）。默认隐藏，需在设置 → MCP → 环境探测中开启 |
 
-> **v1.1 新功能**: 所有终端工具支持灵活定位：
+> **会话定位**（所有终端工具支持，优先级从高到低）：
 > - `sessionId`（稳定 UUID，推荐）
-> - `tabIndex`（传统方式，可能变化）
+> - `tabId`（稳定标签 ID，与 `sessionId` 互通）
+> - `tabIndex`（传统方式，标签重排后会变化）
 > - `title`（部分匹配）
 > - `profileName`（部分匹配）
-> - 无参数 = 使用活跃会话
 
 ### 标签页管理（11 个）
 
@@ -311,6 +313,47 @@ npm run build
 
 ---
 
+## 🔀 与上游的差异
+
+本项目是 [GentlemanHu/Tabby-MCP](https://github.com/GentlemanHu/Tabby-MCP) 的 fork，已合并上游
+v1.6.2 → v1.7.1 的全部功能改动（新增 `submit_keyboard_interactive_response`、`get_session_list`
+认证字段、审批加固、异常退出后重启链路、焦点/输入法修复、SFTP 取消语义、后台审批提醒），
+并保留以下自研能力。
+
+### 本地保留（上游没有）
+
+| 能力 | 说明 |
+|------|------|
+| **命令级安全审批** | `src/security/`：`CommandParser` + `CommandSecurity` + `CommandSecurityManager`，对 `exec_command` / `send_input` 做 allow / confirm / deny 三态判定（只读命令自动放行、危险命令需确认或直接拒绝），可在设置中细调 sudo / 管道 / 重定向 / 命令链 |
+| **冷标签会话激活** | 启动时恢复的标签不会立即建立会话（Tabby 只在标签获得焦点时才创建），此时写入会被静默丢弃。本地新增 `isSessionWritable` / `activateTab` / `ensureSessionLive`，并在冷路径用幂等 echo 探针确认 shell 已接管终端后才发送真实命令 |
+| **Windows 提交键与 Shell 适配** | win32 用 CR、*nix 用 LF 作为提交键；PowerShell 会话使用 `Invoke-Expression` 包装（兼容 5.1） |
+| **标签/会话定位硬化** | `tabId` 与 `sessionId` 互通；无定位时优先全局活跃标签；定位无效时返回明确错误而不是静默回退 |
+| **无 LLM 回归脚本** | `scripts/mcp-test.cjs`（`list` / `call` / `regress` / `verify`） |
+
+### 审批体系：本地决策 + 上游执行
+
+- **决策者**：本地 `CommandSecurityManager`（唯一决策来源）
+- **执行者**：上游 v1.7.1 的非阻塞 DOM 对话框（`dialog.service.ts`），取代原生 `confirm()`，避免阻塞 Electron 事件循环导致 xterm 键盘输入与中文输入法失效
+- `exec_command`、`send_input`、`submit_keyboard_interactive_response` 走同一套决策，不会叠加两次确认；SFTP 敏感操作由设置项「确认 SFTP 操作」独立门控
+
+### 未跟进上游的部分
+
+- 上游 CI（npm + OIDC trusted publishing）——本地用 pnpm
+- 上游 `package-lock.json`——本地用 `pnpm-lock.yaml`
+- 上游 README 的精简改写
+
+### 本地开发命令
+
+```bash
+pnpm install
+pnpm run check    # typecheck + smoke-test + build
+pnpm run build
+node scripts/mcp-test.cjs list     # 需 Tabby 运行且 MCP 已启动
+node scripts/mcp-test.cjs verify
+```
+
+---
+
 ## 🤖 关于本项目
 
 <div align="center">
@@ -342,6 +385,17 @@ npm run build
 ---
 
 ## 📝 更新日志
+
+### v1.7.1-fork.1 (2026-09-28)
+
+合并上游 `v1.6.2 → v1.7.1` 的全部功能改动，并保留本地自研能力（命令级安全审批、冷标签会话激活、Windows 提交键、定位硬化）。完整清单见 [CHANGELOG.md](CHANGELOG.md)，差异说明见上文「与上游的差异」。
+
+**✨ 新特性：**
+- 🔐 **新增 `submit_keyboard_interactive_response`**：应答 SSH 键盘交互认证面板（MFA/TOTP、JumpServer 等）
+- 📊 **`get_session_list` 认证状态**：`sshConnected`、`keyboardInteractivePending` 及非敏感 prompt 元数据
+- 🛡️ **审批加固**：全局 Host 校验、Origin 校验覆盖全部端点、直连工具 API 默认关闭、SFTP 敏感操作确认
+- 🪟 **焦点与输入法修复**：非阻塞对话框取代原生 `confirm()`，xterm 输入与中文输入法不再失效；后台审批会闪烁任务栏提醒
+- 🔁 **异常退出后重启**：端口占用重试退避 + 陈旧实例优雅移交，避免永久 `EADDRINUSE`
 
 ### v1.6.1 (2026-06-06)
 
