@@ -9,13 +9,15 @@ export class McpConfigProvider extends ConfigProvider {
     defaults = {
         mcp: {
             port: 3001,
-            host: 'http://localhost:3001',
+            host: 'http://127.0.0.1:3001',
             enableLogging: true,
             startOnBoot: true,
             logLevel: 'info',
             pairProgrammingMode: {
                 enabled: true,
                 showConfirmationDialog: true,
+                // Require approval for sensitive SFTP operations
+                confirmFileOperations: true,
                 autoFocusTerminal: true,
                 // Auto-allow read/query commands
                 autoAllowReadCommands: true,
@@ -33,7 +35,10 @@ export class McpConfigProvider extends ConfigProvider {
                 pollInterval: 100,          // How often to check for command output
                 initialDelay: 0,            // Delay before starting to poll (0 = no delay)
                 sessionStableChecks: 5,     // Number of stable checks for session ready detection
-                sessionPollInterval: 200    // Interval for session ready polling
+                sessionPollInterval: 200,   // Interval for session ready polling
+                // Local fork: cold-tab activation and shell readiness probe budgets
+                sessionActivationTimeout: 20000,
+                shellReadyTimeout: 10000
             },
             // Session tracking configuration
             sessionTracking: {
@@ -45,6 +50,10 @@ export class McpConfigProvider extends ConfigProvider {
             // Background execution mode - allows MCP to run commands without focusing the terminal
             backgroundExecution: {
                 enabled: false              // Default: false (focus terminal for visibility/safety)
+            },
+            // Compatibility/debug endpoint: POST /api/tool/:name (disabled by default)
+            directToolApi: {
+                enabled: false
             },
             // SFTP configuration (requires tabby-ssh)
             sftp: {
