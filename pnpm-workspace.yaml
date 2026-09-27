@@ -1,0 +1,8 @@
+# pnpm 12 requires explicit approval for dependency build scripts.
+# Without this file, `pnpm install` exits 1 with ERR_PNPM_IGNORED_BUILDS
+# (dependencies still install, but the non-zero exit breaks scripts and CI).
+allowBuilds:
+  # Native module used by webpack watch mode; its install script must run.
+  '@parcel/watcher': true
+  # Type-only dependency (Tabby SSH typings); its build script is not needed.
+  tabby-ssh: false
