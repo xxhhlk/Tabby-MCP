@@ -885,8 +885,12 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
     ): Promise<{ ready: boolean; waitedMs: number; attempts: number }> {
         const timing = this.config.store.mcp?.timing || {};
         const pollInterval = timing.sessionPollInterval ?? 200;
-        const budget = timing.shellReadyTimeout ?? 6000;
-        const perAttempt = Math.min(3000, Math.max(1200, budget));
+        const budget = timing.shellReadyTimeout ?? 10000;
+        // A ready shell answers a probe within ~100-300ms, so a short window is
+        // enough: if nothing comes back the shell is still initialising and we
+        // should re-probe soon instead of burning the whole budget on one wait.
+        // Slow hosts were measured needing >6s before a probe executed cleanly.
+        const perAttempt = Math.min(2000, Math.max(800, budget));
         const started = Date.now();
         let attempts = 0;
 
@@ -914,7 +918,8 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
 
         const waitedMs = Date.now() - started;
         this.logger.warn(
-            `[waitForShellReady] Shell did not confirm readiness within ${waitedMs}ms (${attempts} probe attempt(s)) - sending the command anyway`
+            `[waitForShellReady] Shell did not confirm readiness within ${waitedMs}ms (${attempts} probe attempt(s)) - ` +
+            `sending the command anyway (raise mcp.timing.shellReadyTimeout for very slow hosts)`
         );
         return { ready: false, waitedMs, attempts };
     }
