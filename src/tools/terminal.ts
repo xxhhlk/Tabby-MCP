@@ -624,7 +624,18 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
                             }]
                         };
                     }
-                    const activationInfo = live.activated ? { activatedTab: true, activationWaitMs: live.waitedMs } : {};
+                    const activationInfo = live.activated
+                        ? {
+                            activatedTab: true,
+                            activationWaitMs: live.waitedMs,
+                            ...(live.shellReadyWaitMs !== undefined
+                                ? { shellReadyWaitMs: live.shellReadyWaitMs, probeAttempts: live.probeAttempts }
+                                : {}),
+                            ...(live.shellReady === false
+                                ? { shellReadyWarning: 'Shell never confirmed it consumes input - if the output is empty, retry the command.' }
+                                : {})
+                        }
+                        : {};
 
                     // For non-waiting mode, just send the command
                     if (!waitForOutput) {
@@ -802,7 +813,7 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
     private async ensureSessionLive(
         session: TerminalSessionWithTab,
         alreadyActivated: boolean
-    ): Promise<{ ok: boolean; activated: boolean; waitedMs: number; error?: string }> {
+    ): Promise<{ ok: boolean; activated: boolean; waitedMs: number; shellReady?: boolean; shellReadyWaitMs?: number; probeAttempts?: number; error?: string }> {
         if (this.isSessionWritable(session)) {
             return { ok: true, activated: alreadyActivated, waitedMs: 0 };
         }
@@ -822,7 +833,18 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
             if (this.isSessionWritable(session)) {
                 const waitedMs = Date.now() - started;
                 this.logger.info(`[ensureSessionLive] Session ${session.sessionId} became writable after ${waitedMs}ms`);
-                return { ok: true, activated: true, waitedMs };
+
+                // Writable != ready: the remote shell is still initialising and
+                // swallows type-ahead written during that window (see below).
+                const shell = await this.waitForShellReady(session);
+                return {
+                    ok: true,
+                    activated: true,
+                    waitedMs,
+                    shellReady: shell.ready,
+                    shellReadyWaitMs: shell.waitedMs,
+                    probeAttempts: shell.attempts
+                };
             }
             // Re-assert activation: the tab could have been switched away while waiting.
             this.activateTab(session);
@@ -837,6 +859,64 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
             waitedMs,
             error: `Session not writable after ${waitedMs}ms: the tab was restored on startup but its session never connected (no session object / session.open=false).`
         };
+    }
+
+    /**
+     * Wait until the shell on the other end really consumes input.
+     *
+     * `session.open === true` only means the SSH channel is up. The remote shell
+     * is still initialising (profile/banner scripts) and bash discards pending
+     * type-ahead while it takes over the terminal - so a command written in that
+     * window disappears with NO echo and NO error. That is why the first command
+     * on a cold tab timed out (`Command timeout`, empty output) while an
+     * immediate retry on the same session worked.
+     *
+     * Verify readiness with an idempotent `echo` probe and retry until its
+     * *output* shows up. The token is typed as `TOK""EN` so the echoed command
+     * line itself can never match the searched string `TOKEN` - only a shell that
+     * actually executed it prints the joined form (both bash and PowerShell strip
+     * the empty quotes). Retrying is safe: `echo` has no side effects.
+     *
+     * Runs only on the cold path (a session that just came up), where no
+     * interactive program can be running yet, so the probe cannot disturb state.
+     */
+    private async waitForShellReady(
+        session: TerminalSessionWithTab
+    ): Promise<{ ready: boolean; waitedMs: number; attempts: number }> {
+        const timing = this.config.store.mcp?.timing || {};
+        const pollInterval = timing.sessionPollInterval ?? 200;
+        const budget = timing.shellReadyTimeout ?? 6000;
+        const perAttempt = Math.min(3000, Math.max(1200, budget));
+        const started = Date.now();
+        let attempts = 0;
+
+        while (Date.now() - started < budget) {
+            attempts++;
+            const token = `MCPREADY${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`.toUpperCase();
+            const typed = `${token.slice(0, 4)}""${token.slice(4)}`;
+
+            if (attempts > 1) {
+                // A previous probe may be sitting unsubmitted on the input line.
+                session.tab.sendInput('\x03');
+            }
+            session.tab.sendInput(`echo ${typed}${this.getEnterKey()}`);
+
+            const attemptDeadline = Math.min(started + budget, Date.now() + perAttempt);
+            while (Date.now() < attemptDeadline) {
+                if (this.getTerminalBufferText(session).includes(token)) {
+                    const waitedMs = Date.now() - started;
+                    this.logger.info(`[waitForShellReady] Shell consumed input after ${waitedMs}ms (${attempts} probe attempt(s))`);
+                    return { ready: true, waitedMs, attempts };
+                }
+                await new Promise(resolve => setTimeout(resolve, pollInterval));
+            }
+        }
+
+        const waitedMs = Date.now() - started;
+        this.logger.warn(
+            `[waitForShellReady] Shell did not confirm readiness within ${waitedMs}ms (${attempts} probe attempt(s)) - sending the command anyway`
+        );
+        return { ready: false, waitedMs, attempts };
     }
 
     /**

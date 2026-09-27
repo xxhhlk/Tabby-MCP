@@ -450,6 +450,13 @@ import { PLUGIN_VERSION } from '../version';
         <small class="form-text text-muted">{{ t('mcp.timing.sessionActivationTimeout.desc') }}</small>
       </div>
 
+      <div class="form-group">
+        <label>{{ t('mcp.timing.shellReadyTimeout') }}</label>
+        <input type="number" class="form-control" [(ngModel)]="config.store.mcp.timing.shellReadyTimeout" 
+               placeholder="6000" min="0" max="60000" (change)="saveConfig()">
+        <small class="form-text text-muted">{{ t('mcp.timing.shellReadyTimeout.desc') }}</small>
+      </div>
+
       <hr />
 
       <h4>🔗 {{ t('mcp.connectionInfo.title') }}</h4>
@@ -868,7 +875,8 @@ export class McpSettingsTabComponent implements OnInit, OnDestroy {
         initialDelay: 0,
         sessionStableChecks: 5,
         sessionPollInterval: 200,
-        sessionActivationTimeout: 20000
+        sessionActivationTimeout: 20000,
+        shellReadyTimeout: 6000
       };
     }
     // Ensure sessionTracking config exists
