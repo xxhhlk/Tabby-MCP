@@ -4,6 +4,7 @@ import { Subscription } from 'rxjs';
 import { McpService } from '../services/mcpService';
 import { McpLoggerService } from '../services/mcpLogger.service';
 import { McpI18nService } from '../services/i18n.service';
+import { DialogService } from '../services/dialog.service';
 import { SFTPToolCategory } from '../tools/sftp';
 import { PLUGIN_VERSION } from '../version';
 
@@ -122,6 +123,18 @@ import { PLUGIN_VERSION } from '../version';
             {{ t('mcp.pairProgramming.showDialog') }}
           </label>
         </div>
+      </div>
+
+      <div class="form-group" *ngIf="config.store.mcp.pairProgrammingMode.enabled && config.store.mcp.pairProgrammingMode.showConfirmationDialog">
+        <div class="checkbox">
+          <label>
+            <input type="checkbox" [(ngModel)]="config.store.mcp.pairProgrammingMode.confirmFileOperations" (change)="saveConfig()">
+            {{ t('mcp.pairProgramming.confirmFileOps') }}
+          </label>
+        </div>
+        <small class="form-text text-muted">
+          {{ t('mcp.pairProgramming.confirmFileOps.desc') }}
+        </small>
       </div>
 
       <div class="form-group" *ngIf="config.store.mcp?.pairProgrammingMode?.enabled && config.store.mcp?.pairProgrammingMode?.showConfirmationDialog">
@@ -461,9 +474,9 @@ import { PLUGIN_VERSION } from '../version';
 
       <h4>🔗 {{ t('mcp.connectionInfo.title') }}</h4>
       <div class="connection-info">
-        <p><strong>{{ t('mcp.connectionInfo.streamable') }}</strong> <code>http://localhost:{{ config.store.mcp.port }}/mcp</code></p>
-        <p><strong>{{ t('mcp.connectionInfo.legacySse') }}</strong> <code>http://localhost:{{ config.store.mcp.port }}/sse</code></p>
-        <p><strong>{{ t('mcp.connectionInfo.healthCheck') }}</strong> <code>http://localhost:{{ config.store.mcp.port }}/health</code></p>
+        <p><strong>{{ t('mcp.connectionInfo.streamable') }}</strong> <code>http://127.0.0.1:{{ config.store.mcp.port }}/mcp</code></p>
+        <p><strong>{{ t('mcp.connectionInfo.legacySse') }}</strong> <code>http://127.0.0.1:{{ config.store.mcp.port }}/sse</code></p>
+        <p><strong>{{ t('mcp.connectionInfo.healthCheck') }}</strong> <code>http://127.0.0.1:{{ config.store.mcp.port }}/health</code></p>
         
         <div class="mt-3">
           <p class="text-muted">{{ t('mcp.connectionInfo.addToClient') }}</p>
@@ -480,18 +493,18 @@ import { PLUGIN_VERSION } from '../version';
       <div class="modal-overlay" *ngIf="showMonitor" (click)="closeMonitor()">
         <div class="modal-content" (click)="$event.stopPropagation()">
           <div class="modal-header">
-            <h4>Active Connections ({{ sessions.length }})</h4>
+            <h4>{{ t('mcp.monitor.activeConnections') }} ({{ sessions.length }})</h4>
             <button class="action-btn" (click)="closeMonitor()">✕</button>
           </div>
           <div class="modal-body">
             <table class="session-table">
               <thead>
                 <tr>
-                  <th>Type</th>
-                  <th>Session ID / Client</th>
-                  <th>Duration</th>
-                  <th>Last Activity</th>
-                  <th>Action</th>
+                  <th>{{ t('mcp.monitor.type') }}</th>
+                  <th>{{ t('mcp.monitor.sessionClient') }}</th>
+                  <th>{{ t('mcp.monitor.duration') }}</th>
+                  <th>{{ t('mcp.monitor.lastActivity') }}</th>
+                  <th>{{ t('mcp.monitor.action') }}</th>
                 </tr>
               </thead>
               <tbody>
@@ -508,25 +521,25 @@ import { PLUGIN_VERSION } from '../version';
                     <div>{{ formatTime(s.lastActive) }}</div>
                     <div style="font-size:0.85em; color: #88c0d0; font-weight: bold">{{ s.lastActivity }}</div>
                     <div style="margin-top:4px" *ngIf="s.history && s.history.length">
-                       <div style="font-size:0.75em; opacity:0.5; margin-bottom:2px">History:</div>
+                       <div style="font-size:0.75em; opacity:0.5; margin-bottom:2px">{{ t('mcp.monitor.history') }}</div>
                        <ul class="history-list">
                          <li *ngFor="let h of s.history">{{ h }}</li>
                        </ul>
                     </div>
                   </td>
                   <td>
-                    <button class="action-btn btn-danger-sm" (click)="closeSession(s.id)">Disconnect</button>
+                    <button class="action-btn btn-danger-sm" (click)="closeSession(s.id)">{{ t('mcp.monitor.disconnect') }}</button>
                   </td>
                 </tr>
                 <tr *ngIf="sessions.length === 0">
-                  <td colspan="5" style="text-align: center; padding: 2rem; opacity: 0.6">No active connections</td>
+                  <td colspan="5" style="text-align: center; padding: 2rem; opacity: 0.6">{{ t('mcp.monitor.noConnections') }}</td>
                 </tr>
               </tbody>
             </table>
           </div>
           <div class="modal-header" style="border-top: 1px solid rgba(255,255,255,0.1); border-bottom: none; justify-content: flex-end; padding: 0.75rem;">
-             <button class="btn btn-secondary btn-sm" (click)="refreshSessions()">Refresh</button>
-             <button class="btn btn-primary btn-sm ml-2" (click)="closeMonitor()">Close</button>
+             <button class="btn btn-secondary btn-sm" (click)="refreshSessions()">{{ t('mcp.monitor.refresh') }}</button>
+             <button class="btn btn-primary btn-sm ml-2" (click)="closeMonitor()">{{ t('mcp.monitor.close') }}</button>
           </div>
         </div>
       </div>
@@ -535,63 +548,63 @@ import { PLUGIN_VERSION } from '../version';
       <div class="modal-overlay" *ngIf="showTransferMonitor" (click)="closeTransferMonitor()">
         <div class="modal-content" (click)="$event.stopPropagation()">
           <div class="modal-header">
-            <h4>📤 SFTP Transfers ({{ transfers.length }})</h4>
+            <h4>📤 {{ t('mcp.monitor.sftpTransfers') }} ({{ transfers.length }})</h4>
             <button class="action-btn" (click)="closeTransferMonitor()">✕</button>
           </div>
           <div class="modal-body">
             <table class="session-table">
               <thead>
                 <tr>
-                  <th>Type</th>
-                  <th>File</th>
-                  <th>Connection</th>
-                  <th>Progress</th>
-                  <th>Status</th>
-                  <th>Action</th>
+                  <th>{{ t('mcp.monitor.type') }}</th>
+                  <th>{{ t('mcp.monitor.file') }}</th>
+                  <th>{{ t('mcp.monitor.connection') }}</th>
+                  <th>{{ t('mcp.monitor.progress') }}</th>
+                  <th>{{ t('mcp.monitor.status') }}</th>
+                  <th>{{ t('mcp.monitor.action') }}</th>
                 </tr>
               </thead>
               <tbody>
-                <tr *ngFor="let t of transfers">
+                <tr *ngFor="let tr of transfers">
                   <td>
-                    <span class="transfer-type" [class.upload]="t.type==='upload'" [class.download]="t.type==='download'">
-                      {{ t.type === 'upload' ? '↑' : '↓' }}
+                    <span class="transfer-type" [class.upload]="tr.type==='upload'" [class.download]="tr.type==='download'">
+                      {{ tr.type === 'upload' ? '↑' : '↓' }}
                     </span>
                   </td>
                   <td>
-                    <div class="mono" title="{{t.remotePath}}">{{ getFileName(t.remotePath) }}</div>
-                    <div style="font-size:0.75em; opacity:0.5">{{ t.remotePath }}</div>
+                    <div class="mono" title="{{tr.remotePath}}">{{ getFileName(tr.remotePath) }}</div>
+                    <div style="font-size:0.75em; opacity:0.5">{{ tr.remotePath }}</div>
                   </td>
-                  <td>{{ t.connectionName }}</td>
+                  <td>{{ tr.connectionName }}</td>
                   <td>
                     <div class="progress-bar-container">
-                      <div class="progress-bar-fill" [style.width.%]="t.progress"></div>
-                      <span class="progress-text">{{ t.progress }}%</span>
+                      <div class="progress-bar-fill" [style.width.%]="tr.progress"></div>
+                      <span class="progress-text">{{ tr.progress }}%</span>
                     </div>
                     <div style="font-size:0.75em; opacity:0.6">
-                      <span *ngIf="t.speed">{{ formatBytes(t.speed) }}/s</span>
-                      <span *ngIf="t.bytesTransferred"> · {{ formatBytes(t.bytesTransferred) }} / {{ formatBytes(t.totalBytes) }}</span>
+                      <span *ngIf="tr.speed">{{ formatBytes(tr.speed) }}/s</span>
+                      <span *ngIf="tr.bytesTransferred"> · {{ formatBytes(tr.bytesTransferred) }} / {{ formatBytes(tr.totalBytes) }}</span>
                     </div>
                   </td>
                   <td>
-                    <span class="status-badge" [class.pending]="t.status==='pending'" [class.running]="t.status==='running'"
-                          [class.completed]="t.status==='completed'" [class.failed]="t.status==='failed'" [class.cancelled]="t.status==='cancelled'">
-                      {{ t.status }}
+                    <span class="status-badge" [class.pending]="tr.status==='pending'" [class.running]="tr.status==='running'"
+                          [class.completed]="tr.status==='completed'" [class.failed]="tr.status==='failed'" [class.cancelled]="tr.status==='cancelled'">
+                      {{ tr.status }}
                     </span>
                   </td>
                   <td>
-                    <button class="action-btn btn-danger-sm" (click)="cancelTransfer(t.id)" *ngIf="t.status==='pending' || t.status==='running'">Cancel</button>
+                    <button class="action-btn btn-danger-sm" (click)="cancelTransfer(tr.id)" *ngIf="tr.status==='pending' || tr.status==='running'">{{ t('mcp.monitor.cancel') }}</button>
                   </td>
                 </tr>
                 <tr *ngIf="transfers.length === 0">
-                  <td colspan="6" style="text-align: center; padding: 2rem; opacity: 0.6">No transfers</td>
+                  <td colspan="6" style="text-align: center; padding: 2rem; opacity: 0.6">{{ t('mcp.monitor.noTransfers') }}</td>
                 </tr>
               </tbody>
             </table>
           </div>
           <div class="modal-header" style="border-top: 1px solid rgba(255,255,255,0.1); border-bottom: none; justify-content: flex-end; padding: 0.75rem;">
-             <button class="btn btn-secondary btn-sm" (click)="clearCompletedTransfers()">Clear History</button>
-             <button class="btn btn-secondary btn-sm ml-2" (click)="refreshTransfers()">Refresh</button>
-             <button class="btn btn-primary btn-sm ml-2" (click)="closeTransferMonitor()">Close</button>
+             <button class="btn btn-secondary btn-sm" (click)="clearCompletedTransfers()">{{ t('mcp.monitor.clearHistory') }}</button>
+             <button class="btn btn-secondary btn-sm ml-2" (click)="refreshTransfers()">{{ t('mcp.monitor.refresh') }}</button>
+             <button class="btn btn-primary btn-sm ml-2" (click)="closeTransferMonitor()">{{ t('mcp.monitor.close') }}</button>
           </div>
         </div>
       </div>
@@ -858,12 +871,14 @@ export class McpSettingsTabComponent implements OnInit, OnDestroy {
   saveMessage = '';
   private configSub?: Subscription;
   private lastEnvironmentDetectionEnabled = false;
+  private lastSftpEnabled = true;
 
   constructor(
     public config: ConfigService,
     private mcpService: McpService,
     private logger: McpLoggerService,
     private i18n: McpI18nService,
+    private dialogService: DialogService,
     private sftpTools: SFTPToolCategory
   ) { }
 
@@ -919,8 +934,12 @@ export class McpSettingsTabComponent implements OnInit, OnDestroy {
     if (this.config.store.mcp.sftp.maxDownloadSize === undefined) {
       this.config.store.mcp.sftp.maxDownloadSize = 10 * 1024 * 1024 * 1024;
     }
+    if (this.config.store.mcp.pairProgrammingMode.confirmFileOperations === undefined) {
+      this.config.store.mcp.pairProgrammingMode.confirmFileOperations = true;
+    }
 
     this.lastEnvironmentDetectionEnabled = this.config.store.mcp.environmentDetection.enabled === true;
+    this.lastSftpEnabled = this.config.store.mcp.sftp.enabled !== false;
   }
 
   ngOnDestroy(): void {
@@ -957,7 +976,9 @@ export class McpSettingsTabComponent implements OnInit, OnDestroy {
   viewLogs(): void {
     const logs = this.logger.exportLogs();
     console.log('MCP Logs:', logs);
-    alert('Logs have been printed to the console (Cmd+Option+I)');
+    // Native alert() breaks keyboard/IME focus in the renderer (Issue #7) - use the save message instead
+    this.saveMessage = this.t('mcp.logging.printedToConsole');
+    setTimeout(() => { this.saveMessage = ''; }, 5000);
   }
 
   exportLogsToFile(): void {
@@ -998,18 +1019,27 @@ export class McpSettingsTabComponent implements OnInit, OnDestroy {
 
   async saveConfig(): Promise<void> {
     const environmentDetectionEnabled = this.config.store.mcp?.environmentDetection?.enabled === true;
-    const environmentDetectionChanged = environmentDetectionEnabled !== this.lastEnvironmentDetectionEnabled;
+    const sftpEnabled = this.config.store.mcp?.sftp?.enabled !== false;
+    const toolVisibilityChanged =
+      environmentDetectionEnabled !== this.lastEnvironmentDetectionEnabled ||
+      sftpEnabled !== this.lastSftpEnabled;
 
     await this.config.save();
     this.lastEnvironmentDetectionEnabled = environmentDetectionEnabled;
+    this.lastSftpEnabled = sftpEnabled;
 
-    if (environmentDetectionChanged && this.isRunning) {
-      const shouldRestart = confirm(this.t('mcp.environmentDetection.restart.confirm'));
+    if (toolVisibilityChanged && this.isRunning) {
+      // Non-blocking dialog: native confirm() breaks keyboard/IME focus (Issue #7)
+      const shouldRestart = await this.dialogService.showOperationConfirmation(
+        this.t('mcp.server.restart'),
+        'MCP',
+        this.t('mcp.tools.restart.confirm')
+      );
       if (shouldRestart) {
         await this.restartServer();
-        this.saveMessage = this.t('mcp.environmentDetection.restart.done');
+        this.saveMessage = this.t('mcp.tools.restart.done');
       } else {
-        this.saveMessage = this.t('mcp.environmentDetection.restart.later');
+        this.saveMessage = this.t('mcp.tools.restart.later');
       }
     } else {
       this.saveMessage = this.t('mcp.common.saved');
@@ -1112,7 +1142,7 @@ export class McpSettingsTabComponent implements OnInit, OnDestroy {
       mcpServers: {
         'Tabby MCP': {
           type: 'streamable_http',
-          url: `http://localhost:${port}/mcp`
+          url: `http://127.0.0.1:${port}/mcp`
         }
       }
     }, null, 2);
@@ -1144,7 +1174,13 @@ export class McpSettingsTabComponent implements OnInit, OnDestroy {
   }
 
   async closeSession(sessionId: string): Promise<void> {
-    if (confirm(this.t('Are you sure you want to disconnect this session?'))) {
+    // Non-blocking dialog with a proper i18n key (was a raw English sentence passed as key)
+    const confirmed = await this.dialogService.showOperationConfirmation(
+      this.t('mcp.monitor.disconnect'),
+      'MCP',
+      this.t('mcp.monitor.disconnect.confirm')
+    );
+    if (confirmed) {
       await this.mcpService.closeSession(sessionId);
       this.refreshSessions();
     }
