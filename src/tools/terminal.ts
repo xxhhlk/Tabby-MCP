@@ -3,7 +3,8 @@ import { AppService, BaseTabComponent, ConfigService, SplitTabComponent } from '
 import { BaseTerminalTabComponent, XTermFrontend } from 'tabby-terminal';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import stripAnsi from 'strip-ansi';
-import { BehaviorSubject, Subscription, Subject, ReplaySubject, firstValueFrom } from 'rxjs';
+import { BehaviorSubject, Subscription, ReplaySubject } from 'rxjs';
+import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import { BaseToolCategory } from './base-tool-category';
 import { McpLoggerService } from '../services/mcpLogger.service';
@@ -109,6 +110,7 @@ export class TerminalToolCategory extends BaseToolCategory {
         this.registerTool(this.createGetSessionListTool());
         this.registerTool(this.createExecCommandTool());
         this.registerTool(this.createSendInputTool());
+        this.registerTool(this.createSubmitKeyboardInteractiveResponseTool());
         this.registerTool(this.createGetTerminalBufferTool());
         this.registerTool(this.createAbortCommandTool());
         this.registerTool(this.createGetCommandStatusTool());
@@ -125,12 +127,7 @@ export class TerminalToolCategory extends BaseToolCategory {
     public getOrCreateSessionId(tab: BaseTerminalTabComponent): string {
         let sessionId = this.tabToSessionId.get(tab);
         if (!sessionId) {
-            // Generate UUID
-            sessionId = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-                const r = Math.random() * 16 | 0;
-                const v = c === 'x' ? r : (r & 0x3 | 0x8);
-                return v.toString(16);
-            });
+            sessionId = randomUUID();
             this.tabToSessionId.set(tab, sessionId);
         }
         // Keep reverse map in sync (re-register on every call to survive tab re-creation)
@@ -440,6 +437,38 @@ export class TerminalToolCategory extends BaseToolCategory {
         return null;
     }
 
+    private getKeyboardInteractivePrompt(session: TerminalSessionWithTab): any | null {
+        return (session.tab as any).activeKIPrompt ?? null;
+    }
+
+    private describeKeyboardInteractivePrompt(prompt: any): any | undefined {
+        if (!prompt) {
+            return undefined;
+        }
+
+        return {
+            name: prompt.name ?? '',
+            instruction: prompt.instruction ?? '',
+            prompts: Array.isArray(prompt.prompts)
+                ? prompt.prompts.map((entry: any, index: number) => {
+                    // Current Tabby uses strings; older releases exposed prompt objects.
+                    const text = typeof entry === 'string'
+                        ? entry
+                        : String(entry?.prompt ?? '');
+                    return {
+                        index,
+                        prompt: text,
+                        echo: typeof entry === 'object' && entry !== null
+                            ? entry.echo !== false
+                            : true,
+                        isPassword: /password/i.test(text)
+                    };
+                })
+                : [],
+            responseCount: Array.isArray(prompt.responses) ? prompt.responses.length : 0
+        };
+    }
+
     /**
      * Tool: Get list of terminal sessions with enhanced metadata
      * Now includes detailed split pane information
@@ -461,6 +490,7 @@ For split panes:
                 const sessions = this.findTerminalSessions();
                 const result = sessions.map(s => {
                     const tabAny = s.tab as any;
+                    const keyboardInteractivePrompt = this.getKeyboardInteractivePrompt(s);
                     return {
                         sessionId: s.sessionId,
                         // tabId must match list_tabs: bind to the TOP-LEVEL tab (s.tabParent),
@@ -479,6 +509,11 @@ For split panes:
                         // (it does so lazily on focus), so input cannot be delivered.
                         sessionLive: this.isSessionWritable(s),
                         hasActiveCommand: this._activeCommands.has(s.sessionId),
+                        // SSH auth state: true while Tabby's keyboard-interactive
+                        // (MFA/TOTP) panel is waiting for input.
+                        sshConnected: tabAny.sshSession?.open === true,
+                        keyboardInteractivePending: Boolean(keyboardInteractivePrompt),
+                        keyboardInteractivePrompt: this.describeKeyboardInteractivePrompt(keyboardInteractivePrompt),
                         profile: tabAny.profile ? {
                             id: tabAny.profile.id,
                             name: tabAny.profile.name,
@@ -594,11 +629,18 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
                 }
 
                 try {
-                    // Focus terminal ONLY if background execution is disabled
-                    // Background mode allows AI to work on tabs without disturbing user's current focus
+                    // Focus terminal ONLY if background execution is disabled AND the
+                    // user has not turned off auto-focus (Issue #7: stealing focus
+                    // interrupts the user's typing/IME in another tab).
+                    // Background mode allows AI to work on tabs without disturbing the
+                    // user's current focus.
+                    // NOTE: a cold/restored tab is still activated unconditionally by
+                    // ensureSessionLive() below - Tabby only creates the session once
+                    // the tab gets focus, so without that the command could never run.
                     const backgroundMode = this.config.store.mcp?.backgroundExecution?.enabled ?? false;
+                    const autoFocus = this.config.store.mcp?.pairProgrammingMode?.autoFocusTerminal !== false;
                     let activated = false;
-                    if (!backgroundMode) {
+                    if (!backgroundMode && autoFocus) {
                         this.activateTab(session);
                         activated = true;
                     }
@@ -990,6 +1032,39 @@ Special keys: \\x03 (Ctrl+C), \\x04 (Ctrl+D), \\x1b (Escape), \\r (Enter)`,
                     .replace(/\\t/g, '\t')
                     .replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
 
+                // Raw input can execute commands through Enter/newline, so it goes
+                // through the same decision path as exec_command. The local
+                // CommandSecurityManager stays the single decision maker; upstream's
+                // separate pairProgrammingMode-only gate is deliberately NOT used, so
+                // a single keystroke can never produce two stacked confirmations.
+                // Note: the submitted text is never written to the log - it may be a
+                // password typed into a sudo/passphrase prompt.
+                const pairMode = this.config.store.mcp?.pairProgrammingMode;
+                if (pairMode?.enabled && pairMode?.showConfirmationDialog) {
+                    const commandText = this.extractSubmittedCommandLine(processedInput);
+                    if (commandText) {
+                        const securityManager = this.getSecurityManager();
+                        securityManager.updateConfig(this.getSecurityConfig());
+                        const decision = securityManager.evaluate(commandText);
+
+                        if (decision.action === 'allow') {
+                            this.logger.info(`Auto-allowed terminal input (${decision.reason})`);
+                        } else if (decision.action === 'confirm') {
+                            const confirmed = await this.dialogService.showCommandConfirmation(commandText, session.tabIndex);
+                            if (!confirmed) {
+                                return {
+                                    content: [{ type: 'text', text: JSON.stringify({ success: false, error: 'Input rejected by user' }) }]
+                                };
+                            }
+                        } else {
+                            this.logger.warn(`Terminal input denied (${decision.reason})`);
+                            return {
+                                content: [{ type: 'text', text: JSON.stringify({ success: false, error: `Input denied: ${decision.reason}` }) }]
+                            };
+                        }
+                    }
+                }
+
                 try {
                     session.tab.sendInput(processedInput);
                     this.logger.info(`Sent input to session ${session.sessionId}`);
@@ -1011,6 +1086,201 @@ Special keys: \\x03 (Ctrl+C), \\x04 (Ctrl+D), \\x1b (Escape), \\r (Enter)`,
                 }
             }
         };
+    }
+
+    /**
+     * Tool: Submit response to Tabby's SSH keyboard-interactive auth panel
+     */
+    private createSubmitKeyboardInteractiveResponseTool(): McpTool {
+        return {
+            name: 'submit_keyboard_interactive_response',
+            description: `Submit response(s) to an active SSH keyboard-interactive authentication prompt.
+Use this for MFA/TOTP prompts shown by Tabby's SSH authentication panel, such as Jumpserver MFA.
+
+This tool targets Tabby's activeKIPrompt object directly; it is different from send_input,
+which writes to the terminal pty and cannot answer Tabby's auth form.
+
+Session targeting (priority order): sessionId > tabId > tabIndex > title > profileName`,
+            schema: z.object({
+                response: z.string().optional().describe('Single response for prompts with one field, such as a 6-digit TOTP code'),
+                responses: z.array(z.string()).optional().describe('Responses for multi-prompt keyboard-interactive auth, in prompt order'),
+                sessionId: z.string().optional().describe('Stable session ID (recommended, from get_session_list)'),
+                tabId: z.string().optional().describe('Stable tab ID (from list_tabs or get_session_list, interchangeable with sessionId)'),
+                tabIndex: z.number().optional().describe('Tab index (legacy, may change if tabs reorder)'),
+                title: z.string().optional().describe('Match session by title (partial, case-insensitive)'),
+                profileName: z.string().optional().describe('Match session by profile name (partial, case-insensitive)')
+            }).strict(),
+            handler: async (params: {
+                response?: string;
+                responses?: string[];
+                sessionId?: string;
+                tabId?: string;
+                tabIndex?: number;
+                title?: string;
+                profileName?: string;
+            }) => {
+                const { response, responses, sessionId, tabId, tabIndex, title, profileName } = params;
+                const session = this.findSessionByLocator({ sessionId, tabId, tabIndex, title, profileName });
+
+                if (!session) {
+                    return {
+                        content: [{
+                            type: 'text', text: JSON.stringify({
+                                success: false,
+                                error: 'No matching terminal session found',
+                                hint: 'Use get_session_list to see available sessions'
+                            })
+                        }]
+                    };
+                }
+
+                const prompt = this.getKeyboardInteractivePrompt(session);
+                if (!prompt) {
+                    return {
+                        content: [{
+                            type: 'text', text: JSON.stringify({
+                                success: false,
+                                sessionId: session.sessionId,
+                                keyboardInteractivePending: false,
+                                error: 'No active keyboard-interactive prompt on this session'
+                            })
+                        }]
+                    };
+                }
+
+                const providedResponses = responses ?? (response !== undefined ? [response] : undefined);
+                if (!providedResponses || providedResponses.length === 0) {
+                    return {
+                        content: [{
+                            type: 'text', text: JSON.stringify({
+                                success: false,
+                                sessionId: session.sessionId,
+                                keyboardInteractivePending: true,
+                                keyboardInteractivePrompt: this.describeKeyboardInteractivePrompt(prompt),
+                                error: 'Provide response or responses'
+                            })
+                        }]
+                    };
+                }
+
+                if (!Array.isArray(prompt.responses) || !Array.isArray(prompt.prompts)) {
+                    return {
+                        content: [{
+                            type: 'text', text: JSON.stringify({
+                                success: false,
+                                sessionId: session.sessionId,
+                                error: 'Active keyboard-interactive prompt has an unexpected shape',
+                                keyboardInteractivePrompt: this.describeKeyboardInteractivePrompt(prompt)
+                            })
+                        }]
+                    };
+                }
+
+                if (providedResponses.length !== prompt.prompts.length) {
+                    return {
+                        content: [{
+                            type: 'text', text: JSON.stringify({
+                                success: false,
+                                sessionId: session.sessionId,
+                                error: `Expected ${prompt.prompts.length} response(s), got ${providedResponses.length}`,
+                                keyboardInteractivePrompt: this.describeKeyboardInteractivePrompt(prompt)
+                            })
+                        }]
+                    };
+                }
+
+                if (typeof prompt.respond !== 'function') {
+                    return {
+                        content: [{
+                            type: 'text', text: JSON.stringify({
+                                success: false,
+                                sessionId: session.sessionId,
+                                error: 'Keyboard-interactive prompt does not expose respond()'
+                            })
+                        }]
+                    };
+                }
+
+                // Approval goes through the same dialog as every other MCP operation.
+                // The preview carries ONLY the response count - TOTP codes and
+                // passwords must never appear in a dialog or in the log.
+                const pairMode = this.config.store.mcp?.pairProgrammingMode;
+                if (pairMode?.enabled && pairMode?.showConfirmationDialog) {
+                    const confirmed = await this.dialogService.showOperationConfirmation(
+                        'submit_keyboard_interactive_response',
+                        session.tab.title || `Terminal ${session.tabIndex}`,
+                        `${providedResponses.length} keyboard-interactive response(s)`
+                    );
+                    if (!confirmed) {
+                        return {
+                            content: [{
+                                type: 'text', text: JSON.stringify({
+                                    success: false,
+                                    sessionId: session.sessionId,
+                                    error: 'Keyboard-interactive response rejected by user'
+                                })
+                            }]
+                        };
+                    }
+                }
+
+                const previousResponses = [...prompt.responses];
+                try {
+                    providedResponses.forEach((value, index) => {
+                        prompt.responses[index] = value;
+                    });
+
+                    prompt.respond();
+                    (session.tab as any).activeKIPrompt = null;
+                    (session.tab as any).frontend?.focus?.();
+
+                    this.logger.info(`Submitted keyboard-interactive response for session ${session.sessionId}`);
+                    return {
+                        content: [{
+                            type: 'text', text: JSON.stringify({
+                                success: true,
+                                sessionId: session.sessionId,
+                                submitted: true,
+                                responseCount: providedResponses.length,
+                                message: 'Keyboard-interactive response submitted'
+                            })
+                        }]
+                    };
+                } catch (error: any) {
+                    prompt.responses.splice(0, prompt.responses.length, ...previousResponses);
+                    this.logger.error(`Error submitting keyboard-interactive response for session ${session.sessionId}:`, error);
+                    return {
+                        content: [{
+                            type: 'text', text: JSON.stringify({
+                                success: false,
+                                sessionId: session.sessionId,
+                                error: `Failed to submit keyboard-interactive response: ${error.message || error}`
+                            })
+                        }]
+                    };
+                }
+            }
+        };
+    }
+
+    /**
+     * Extract the command line that a raw terminal input would actually submit.
+     *
+     * send_input writes raw bytes to the pty, so the security decision has to be
+     * made on the text that precedes the first Enter/newline: everything after it
+     * is a second command and would otherwise slip past the check.
+     * Returns null when the input cannot start a command on its own (Ctrl+C,
+     * Escape, arrow keys, Home/End, ...), so plain keystrokes are never gated.
+     */
+    private extractSubmittedCommandLine(input: string): string | null {
+        const firstBreak = input.search(/[\r\n]/);
+        const line = firstBreak === -1 ? input : input.slice(0, firstBreak);
+        const cleaned = line
+            .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')  // CSI sequences (arrows, Home/End, ...)
+            .replace(/\t/g, ' ')                     // Tab is a word separator, not a submit
+            .replace(/[\x00-\x1f\x7f]/g, '')         // any remaining control char (Ctrl+C, Ctrl+D, ...)
+            .trim();
+        return cleaned || null;
     }
 
     private parseEnvironmentFromBuffer(
@@ -1137,65 +1407,11 @@ Session targeting: sessionId > tabId > tabIndex > title > profileName`,
                 const useEnhancedHeuristics = environmentDetectionConfig?.useEnhancedHeuristics !== false;
                 const detectionMode = environmentDetectionConfig?.mode ?? 'heuristic';
                 const bufferContent = this.getTerminalBufferText(session);
-                const normalizedLines = bufferContent
-                    .split('\n')
-                    .map(line => {
-                        const raw = line.trimEnd();
-                        const clean = useEnhancedHeuristics
-                            ? stripAnsi(raw).replace(/\[[0-9;?]*[a-zA-Z]/g, '').trim()
-                            : raw.trim();
-                        return { raw, clean };
-                    })
-                    .filter(line => line.raw.length > 0 || line.clean.length > 0);
-
-                const replMatchers: Array<{ environment: string; pattern: RegExp }> = [
-                    { environment: 'python', pattern: /^>>>$/ },
-                    { environment: 'ruby', pattern: /^(irb>|irb\(main\):.*)$/ },
-                    { environment: 'mysql', pattern: /^mysql>$/ },
-                    { environment: 'postgres', pattern: /^(postgres[=#>-]?|\w+=>|\w+=#)$/ },
-                    { environment: 'sqlite', pattern: /^sqlite>$/ },
-                    { environment: 'mongodb', pattern: /^(mongo>|mongosh>|Enterprise\s.+>)$/ },
-                    { environment: 'redis', pattern: /^127\.0\.0\.1:\d+>$/ },
-                    { environment: 'node', pattern: /^>$/ },
-                ];
-
-                let environment = 'unknown';
-                let isShell = false;
-                let promptRaw = '';
-                let promptClean = '';
-                const fallbackLine = normalizedLines.length > 0 ? normalizedLines[normalizedLines.length - 1] : { raw: '', clean: '' };
-
-                for (let i = normalizedLines.length - 1; i >= 0; i--) {
-                    const candidate = normalizedLines[i];
-                    if (!candidate.clean) {
-                        continue;
-                    }
-
-                    const replMatch = replMatchers.find(m => m.pattern.test(candidate.clean));
-                    if (replMatch) {
-                        environment = replMatch.environment;
-                        promptRaw = candidate.raw;
-                        promptClean = candidate.clean;
-                        break;
-                    }
-
-                    if (/[$#%❯➜]\s*$/.test(candidate.clean)) {
-                        isShell = true;
-                        const detectedShell = this.detectShellType(session);
-                        environment = detectedShell === 'sh' ? 'shell' : detectedShell;
-                        promptRaw = candidate.raw;
-                        promptClean = candidate.clean;
-                        break;
-                    }
-                }
-
-                if (!promptRaw) {
-                    isShell = true;
-                    const detectedShell = this.detectShellType(session);
-                    environment = detectedShell === 'sh' ? 'shell' : detectedShell;
-                    promptRaw = fallbackLine.raw;
-                    promptClean = fallbackLine.clean;
-                }
+                const parsed = this.parseEnvironmentFromBuffer(session, bufferContent, useEnhancedHeuristics);
+                let environment = parsed.environment;
+                let isShell = parsed.isShell;
+                const promptRaw = parsed.promptRaw;
+                const promptClean = parsed.promptClean;
 
                 const tabAny = session.tab as any;
                 const profile = tabAny.profile ? {
@@ -1247,7 +1463,10 @@ Session targeting: sessionId > tabId > tabIndex > title > profileName`,
         if (shell === 'powershell') {
             return { environment: 'powershell', isShell: true };
         }
-        const command = `printf '__MCP_ENV__:'; if [ -n "$VIRTUAL_ENV" ]; then printf 'python-venv'; elif [ -n "$CONDA_DEFAULT_ENV" ]; then printf 'python-conda'; elif [ -n "$IN_NIX_SHELL" ]; then printf 'nix-shell'; else printf 'shell'; fi; printf ':__MCP_ENV__'`;
+        // fish does not support POSIX `if [ -n ... ]; then` syntax, so use a fish-native probe
+        const command = shell === 'fish'
+            ? `printf '__MCP_ENV__:'; if test -n "$VIRTUAL_ENV"; printf 'python-venv'; else if test -n "$CONDA_DEFAULT_ENV"; printf 'python-conda'; else if test -n "$IN_NIX_SHELL"; printf 'nix-shell'; else; printf 'shell'; end; printf ':__MCP_ENV__'`
+            : `printf '__MCP_ENV__:'; if [ -n "$VIRTUAL_ENV" ]; then printf 'python-venv'; elif [ -n "$CONDA_DEFAULT_ENV" ]; then printf 'python-conda'; elif [ -n "$IN_NIX_SHELL" ]; then printf 'nix-shell'; else printf 'shell'; fi; printf ':__MCP_ENV__'`;
 
         try {
             const startMarker = `__MCP_ENV_START_${Date.now()}__`;
@@ -1589,8 +1808,6 @@ After focusing, commands sent to that split tab will go to the focused pane.`,
         isAborted: () => boolean
     ): Promise<CommandResult> {
         const startTime = Date.now();
-        let lastBufferLength = 0;
-        let stableCount = 0;
 
         // Get timing config (with fallback defaults)
         const timing = this.config.store.mcp?.timing || {};
@@ -1661,8 +1878,6 @@ After focusing, commands sent to that split tab will go to the focused pane.`,
                     let output = buffer.substring(0, endIndex).trim();
                     const exitCode = parseInt(endMatch[1], 10);
 
-                    // Try to clean up command echo if it appears at the very top (unlikely in this case, but good practice)
-                    const lines = output.split('\n');
                     // Add a warning note to the output so the user/LLM knows it's truncated
                     output = `[MCP Warning: Output truncated, start marker missing]\n${output}`;
 
@@ -1672,14 +1887,6 @@ After focusing, commands sent to that split tab will go to the focused pane.`,
                         exitCode
                     };
                 }
-            }
-
-            // Track buffer stability (helps detect when output is complete)
-            if (buffer.length === lastBufferLength) {
-                stableCount++;
-            } else {
-                stableCount = 0;
-                lastBufferLength = buffer.length;
             }
 
             // Wait between checks (configurable via Settings → MCP → Timing)
