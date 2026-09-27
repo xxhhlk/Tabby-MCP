@@ -1,0 +1,8 @@
+# Normalize all text files to LF in the repository and the working tree.
+#
+# Upstream (GentlemanHu/Tabby-MCP) stores every file as LF -- including
+# scripts/install.ps1 -- so no per-extension overrides are needed.
+#
+# This repo had drifted to CRLF in 25 tracked files, which made every diff
+# against upstream look like a full-file rewrite.
+* text=auto eol=lf
