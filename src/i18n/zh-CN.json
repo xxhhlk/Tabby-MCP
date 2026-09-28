@@ -99,6 +99,8 @@
     "mcp.timing.sessionActivationTimeout.desc": "恢复但未激活的标签，等待其创建并连接会话的最长时间，超时则命令失败（默认：20000）",
     "mcp.timing.shellReadyTimeout": "Shell 就绪探测上限（毫秒）",
     "mcp.timing.shellReadyTimeout.desc": "冷标签连上后，持续用幂等 echo 探测直到远端 shell 真正开始消费输入的最长时间。shell 初始化期间会丢弃提前写入的输入（默认：10000）",
+    "mcp.timing.autoReconnect": "自动重连已断开的会话",
+    "mcp.timing.autoReconnect.desc": "标签因连接断开而显示「按任意键重新连接」时，自动触发 Tabby 自带的重连，而不是干等到超时。手动点过「断开连接」的标签不会被重连（默认：开启）",
     "mcp.connectionInfo.title": "连接信息",
     "mcp.connectionInfo.streamable": "Streamable HTTP（推荐）：",
     "mcp.connectionInfo.legacySse": "Legacy SSE：",

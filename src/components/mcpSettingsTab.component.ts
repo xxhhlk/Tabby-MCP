@@ -470,6 +470,16 @@ import { PLUGIN_VERSION } from '../version';
         <small class="form-text text-muted">{{ t('mcp.timing.shellReadyTimeout.desc') }}</small>
       </div>
 
+      <div class="form-group">
+        <div class="checkbox">
+          <label>
+            <input type="checkbox" [ngModel]="config.store.mcp.timing.autoReconnect ?? true" (ngModelChange)="setAutoReconnect($event)">
+            {{ t('mcp.timing.autoReconnect') }}
+          </label>
+        </div>
+        <small class="form-text text-muted">{{ t('mcp.timing.autoReconnect.desc') }}</small>
+      </div>
+
       <hr />
 
       <h4>🔗 {{ t('mcp.connectionInfo.title') }}</h4>
@@ -891,7 +901,8 @@ export class McpSettingsTabComponent implements OnInit, OnDestroy {
         sessionStableChecks: 5,
         sessionPollInterval: 200,
         sessionActivationTimeout: 20000,
-        shellReadyTimeout: 10000
+        shellReadyTimeout: 10000,
+        autoReconnect: true
       };
     }
     // Ensure sessionTracking config exists
@@ -1097,6 +1108,22 @@ export class McpSettingsTabComponent implements OnInit, OnDestroy {
       };
     }
     this.config.store.mcp.pairProgrammingMode.commandSecurity[option] = value;
+    this.saveConfig();
+  }
+
+  setAutoReconnect(value: boolean): void {
+    if (!this.config.store.mcp.timing) {
+      this.config.store.mcp.timing = {
+        pollInterval: 100,
+        initialDelay: 0,
+        sessionStableChecks: 5,
+        sessionPollInterval: 200,
+        sessionActivationTimeout: 20000,
+        shellReadyTimeout: 10000,
+        autoReconnect: true
+      };
+    }
+    this.config.store.mcp.timing.autoReconnect = value;
     this.saveConfig();
   }
 

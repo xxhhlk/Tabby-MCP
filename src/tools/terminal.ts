@@ -508,6 +508,11 @@ For split panes:
                         // false => restored/cold tab: Tabby has not created the session yet
                         // (it does so lazily on focus), so input cannot be delivered.
                         sessionLive: this.isSessionWritable(s),
+                        // true => the tab is sitting on "press any key to reconnect"
+                        // (MCP can revive this automatically; see ensureSessionLive).
+                        awaitingReconnect: this.getReconnectState(s).awaitingReconnect,
+                        // true => user pressed Disconnect deliberately; MCP will not reconnect it.
+                        disconnectedByUser: this.getReconnectState(s).blockedByUser,
                         hasActiveCommand: this._activeCommands.has(s.sessionId),
                         // SSH auth state: true while Tabby's keyboard-interactive
                         // (MFA/TOTP) panel is waiting for input.
@@ -660,8 +665,9 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
                                     sessionId: session.sessionId,
                                     error: live.error,
                                     waitedMs: live.waitedMs,
-                                    ...(noLocatorWarning ? { warning: noLocatorWarning } : {}),
-                                    hint: 'The tab was restored on startup but its session never became writable (SSH auth prompt? host unreachable?). Inspect/reconnect the tab in Tabby, then retry.'
+                                    ...(live.reconnected ? { autoReconnectAttempted: true } : {}),
+                                    ...(live.hint ? { hint: live.hint } : {}),
+                                    ...(noLocatorWarning ? { warning: noLocatorWarning } : {})
                                 })
                             }]
                         };
@@ -670,6 +676,7 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
                         ? {
                             activatedTab: true,
                             activationWaitMs: live.waitedMs,
+                            ...(live.reconnected ? { autoReconnectAttempted: true } : {}),
                             ...(live.shellReadyWaitMs !== undefined
                                 ? { shellReadyWaitMs: live.shellReadyWaitMs, probeAttempts: live.probeAttempts }
                                 : {}),
@@ -844,10 +851,67 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
     }
 
     /**
-     * Guarantee the target session can receive input, activating the tab first
-     * when it is still cold (restored but never focused).
+     * Inspect Tabby's post-disconnect state.
      *
-     * NOTE: activation is mandatory in that case and therefore overrides
+     * `ConnectableTerminalTabComponent` (the base of SSH/telnet tabs) reacts to a
+     * lost session in two ways:
+     *  - `reconnectOffered === true`: it printed "Press any key to reconnect" and
+     *    subscribed to `input$.pipe(first())` - i.e. it is blocked until a real
+     *    keyboard event arrives to call `reconnect()`. Focusing the tab does NOT
+     *    satisfy that subscription, so without help an MCP command just waits out
+     *    its whole timeout.
+     *  - `isDisconnectedByHand === true`: the user pressed Disconnect - that is a
+     *    deliberate choice, so fail fast instead of reconnecting behind their back.
+     *
+     * Not to be confused with the cold-tab state (session === null because the
+     * tab was restored and never focused): there `reconnectOffered` is still false.
+     */
+    private getReconnectState(session: TerminalSessionWithTab): {
+        awaitingReconnect: boolean;
+        blockedByUser: boolean;
+        canReconnect: boolean;
+    } {
+        const tabAny = session.tab as any;
+        return {
+            awaitingReconnect: tabAny?.reconnectOffered === true,
+            blockedByUser: tabAny?.isDisconnectedByHand === true,
+            canReconnect: typeof tabAny?.reconnect === 'function',
+        };
+    }
+
+    private isAutoReconnectEnabled(): boolean {
+        try {
+            return this.config.store.mcp?.timing?.autoReconnect !== false;
+        } catch {
+            return true;
+        }
+    }
+
+    /**
+     * Call the tab's own reconnect() - byte-for-byte what "press any key" does,
+     * minus the keyboard. Fire-and-forget: a failed attempt leaves the tab with
+     * `session.open === false`, which the caller's poll loop reports as a timeout.
+     */
+    private requestReconnect(session: TerminalSessionWithTab): void {
+        const tabAny = session.tab as any;
+        try {
+            const result = tabAny.reconnect();
+            if (result && typeof result.then === 'function') {
+                result.then(undefined, (e: any) => {
+                    this.logger.error(`[ensureSessionLive] Programmatic reconnect failed: ${e?.message ?? e}`);
+                });
+            }
+        } catch (e: any) {
+            this.logger.error(`[ensureSessionLive] Programmatic reconnect threw: ${e?.message ?? e}`);
+        }
+    }
+
+    /**
+     * Guarantee the target session can receive input, activating the tab first
+     * when it is still cold (restored but never focused), and driving Tabby's
+     * "press any key to reconnect" prompt when the session was lost.
+     *
+     * NOTE: activation is mandatory in the cold case and therefore overrides
      * background execution mode - the frontend is attached only on focus, so
      * without it the session would never be created and the command could never
      * run at all.
@@ -855,7 +919,7 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
     private async ensureSessionLive(
         session: TerminalSessionWithTab,
         alreadyActivated: boolean
-    ): Promise<{ ok: boolean; activated: boolean; waitedMs: number; shellReady?: boolean; shellReadyWaitMs?: number; probeAttempts?: number; error?: string }> {
+    ): Promise<{ ok: boolean; activated: boolean; reconnected?: boolean; waitedMs: number; shellReady?: boolean; shellReadyWaitMs?: number; probeAttempts?: number; error?: string; hint?: string }> {
         if (this.isSessionWritable(session)) {
             return { ok: true, activated: alreadyActivated, waitedMs: 0 };
         }
@@ -864,10 +928,34 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
         const pollInterval = timing.sessionPollInterval ?? 200;
         const timeout = timing.sessionActivationTimeout ?? 20000;
         const started = Date.now();
+        const reconnectState = this.getReconnectState(session);
+
+        if (reconnectState.blockedByUser) {
+            this.logger.warn(`[ensureSessionLive] Session ${session.sessionId} was disconnected manually - not reconnecting`);
+            return {
+                ok: false,
+                activated: alreadyActivated,
+                waitedMs: 0,
+                error: 'Session is disconnected (you pressed "Disconnect" in Tabby) - MCP will not reconnect a tab that was deliberately closed.',
+                hint: 'Click the tab and press any key in Tabby to reconnect, then retry.'
+            };
+        }
+
+        // The tab is sitting on "press any key to reconnect" - nothing else will
+        // ever revive it, so trigger the reconnect instead of waiting it out.
+        let reconnected = false;
+        if (reconnectState.awaitingReconnect && reconnectState.canReconnect && this.isAutoReconnectEnabled()) {
+            this.logger.warn(
+                `[ensureSessionLive] Session ${session.sessionId} is awaiting "press any key to reconnect" - triggering tab.reconnect()`
+            );
+            this.requestReconnect(session);
+            reconnected = true;
+        }
 
         this.logger.warn(
-            `[ensureSessionLive] Session ${session.sessionId} has no writable session (restored/cold tab) - ` +
-            `activating tab and waiting up to ${timeout}ms for it to connect`
+            `[ensureSessionLive] Session ${session.sessionId} has no writable session ` +
+            `(awaitingReconnect=${reconnectState.awaitingReconnect}, reconnected=${reconnected}) - ` +
+            `waiting up to ${timeout}ms for it to connect`
         );
         this.activateTab(session);
 
@@ -882,6 +970,7 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
                 return {
                     ok: true,
                     activated: true,
+                    reconnected,
                     waitedMs,
                     shellReady: shell.ready,
                     shellReadyWaitMs: shell.waitedMs,
@@ -894,12 +983,24 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
         }
 
         const waitedMs = Date.now() - started;
+        const kipPending = this.getKeyboardInteractivePrompt(session) !== null;
         this.logger.error(`[ensureSessionLive] Session ${session.sessionId} never became writable (${waitedMs}ms)`);
+
+        const diagnosis = kipPending
+            ? 'SSH is waiting for keyboard-interactive input (MFA/TOTP) in Tabby.'
+            : reconnectState.awaitingReconnect || reconnected
+                ? 'The reconnect did not complete - the host may be unreachable or authentication failed.'
+                : 'The tab was restored on startup but its session never connected (no session object / session.open=false).';
+
         return {
             ok: false,
             activated: true,
+            reconnected,
             waitedMs,
-            error: `Session not writable after ${waitedMs}ms: the tab was restored on startup but its session never connected (no session object / session.open=false).`
+            error: `Session not writable after ${waitedMs}ms: ${diagnosis}`,
+            hint: kipPending
+                ? 'Complete the keyboard-interactive prompt in Tabby, then retry.'
+                : 'Check the tab in Tabby (red SSH error line? "Press any key to reconnect"?), then retry.'
         };
     }
 
@@ -1019,7 +1120,8 @@ Special keys: \\x03 (Ctrl+C), \\x04 (Ctrl+D), \\x1b (Escape), \\r (Enter)`,
                                 sessionId: session.sessionId,
                                 error: live.error,
                                 waitedMs: live.waitedMs,
-                                hint: 'Input was NOT sent. Inspect/reconnect the tab in Tabby, then retry.'
+                                ...(live.reconnected ? { autoReconnectAttempted: true } : {}),
+                                hint: live.hint ?? 'Input was NOT sent. Inspect/reconnect the tab in Tabby, then retry.'
                             })
                         }]
                     };
@@ -1824,16 +1926,22 @@ After focusing, commands sent to that split tab will go to the focused pane.`,
                 return { success: false, output: '', error: 'Command aborted' };
             }
 
-            // Check if session is still valid - abort immediately if disconnected
-            // NOTE: tab.destroyed is a Subject<void>, NOT a boolean! Only check session.open
+            // Check if session is still valid - abort immediately if disconnected.
+            // NOTE: tab.destroyed is a Subject<void>, NOT a boolean! Only check session.open.
+            // `session === null` also means gone: Tabby's onSessionDestroyed() sets it to
+            // null, and WITHOUT this check the loop would spin until the full timeout
+            // (the old code only looked at `session.open === false`, which never matches
+            // once the session object itself is null).
             const tabAny = session.tab as any;
             const sessionObj = tabAny.session;
-            if (sessionObj && sessionObj.open === false) {
-                this.logger.warn(`[waitForCommandOutput] Session ${session.sessionId} disconnected: session.open=false`);
+            if (!sessionObj || sessionObj.open === false) {
+                this.logger.warn(`[waitForCommandOutput] Session ${session.sessionId} lost during execution (session=${sessionObj ? 'open=false' : 'null'})`);
                 return {
                     success: false,
                     output: '',
-                    error: 'Session disconnected during execution',
+                    error: sessionObj
+                        ? 'Session disconnected during execution'
+                        : 'Session was lost during execution (connection dropped before the command finished)',
                     exitCode: -1
                 };
             }
@@ -1969,14 +2077,19 @@ After focusing, commands sent to that split tab will go to the focused pane.`,
                 }
                 const tabAny = session.tab as any;
                 const sessionObj = tabAny.session;
-                if (sessionObj && sessionObj.open === false) {
-                    this.logger.warn(`[StreamCapture] Session ${session.sessionId} disconnected: session.open=false`);
+                // `session === null` means Tabby already dropped it (onSessionDestroyed
+                // sets it to null) - otherwise this health check would never fire and the
+                // command would hang until the full timeout.
+                if (!sessionObj || sessionObj.open === false) {
+                    this.logger.warn(`[StreamCapture] Session ${session.sessionId} lost: session=${sessionObj ? 'open=false' : 'null'}`);
                     resolved = true;
                     cleanup();
                     resolve({
                         success: false,
                         output: '',
-                        error: 'Session disconnected during execution',
+                        error: sessionObj
+                            ? 'Session disconnected during execution'
+                            : 'Session was lost during execution (connection dropped before the command finished)',
                         exitCode: -1
                     });
                 }
