@@ -491,6 +491,7 @@ For split panes:
                 const result = sessions.map(s => {
                     const tabAny = s.tab as any;
                     const keyboardInteractivePrompt = this.getKeyboardInteractivePrompt(s);
+                    const reconnectState = this.getReconnectState(s);
                     return {
                         sessionId: s.sessionId,
                         // tabId must match list_tabs: bind to the TOP-LEVEL tab (s.tabParent),
@@ -510,9 +511,9 @@ For split panes:
                         sessionLive: this.isSessionWritable(s),
                         // true => the tab is sitting on "press any key to reconnect"
                         // (MCP can revive this automatically; see ensureSessionLive).
-                        awaitingReconnect: this.getReconnectState(s).awaitingReconnect,
+                        awaitingReconnect: reconnectState.awaitingReconnect,
                         // true => user pressed Disconnect deliberately; MCP will not reconnect it.
-                        disconnectedByUser: this.getReconnectState(s).blockedByUser,
+                        disconnectedByUser: reconnectState.blockedByUser,
                         hasActiveCommand: this._activeCommands.has(s.sessionId),
                         // SSH auth state: true while Tabby's keyboard-interactive
                         // (MFA/TOTP) panel is waiting for input.
