@@ -336,6 +336,21 @@ v1.6.2 → v1.7.1 的全部功能改动（新增 `submit_keyboard_interactive_re
 - **执行者**：上游 v1.7.1 的非阻塞 DOM 对话框（`dialog.service.ts`），取代原生 `confirm()`，避免阻塞 Electron 事件循环导致 xterm 键盘输入与中文输入法失效
 - `exec_command`、`send_input`、`submit_keyboard_interactive_response` 走同一套决策，不会叠加两次确认；SFTP 敏感操作由设置项「确认 SFTP 操作」独立门控
 
+### 有意移除的上游防护
+
+| 移除项 | 说明 |
+|------|------|
+| **Host 头校验** | 上游 v1.7.1 在全局中间件要求 `Host` 为 `127.0.0.1` / `localhost` 且端口匹配，本 fork 已移除 |
+| **Origin 头校验** | 上游 v1.7.1 在 `/mcp`、`/sse`、`/messages`、`/api/tool/:name` 校验 `Origin`，本 fork 已移除 |
+
+移除后**不再有任何请求因 Host / Origin 头被拒**（原为 `403`）。剩余访问控制：
+
+- 服务仍只绑 `127.0.0.1`（`listenOnce()`）——非本机流量无法建立 TCP 连接
+- `/internal/shutdown` 仍要求回环来源 + `x-tabby-mcp-control-token`
+- `/api/tool/:name` 直连 API 默认关闭（需 `directToolApi.enabled = true`）
+
+> ⚠️ MCP 端点本身无鉴权。若日后把监听地址改到非回环接口，必须先自行加上访问控制。
+
 ### 未跟进上游的部分
 
 - 上游 CI（npm + OIDC trusted publishing）——本地用 pnpm
@@ -393,7 +408,7 @@ node scripts/mcp-test.cjs verify
 **✨ 新特性：**
 - 🔐 **新增 `submit_keyboard_interactive_response`**：应答 SSH 键盘交互认证面板（MFA/TOTP、JumpServer 等）
 - 📊 **`get_session_list` 认证状态**：`sshConnected`、`keyboardInteractivePending` 及非敏感 prompt 元数据
-- 🛡️ **审批加固**：全局 Host 校验、Origin 校验覆盖全部端点、直连工具 API 默认关闭、SFTP 敏感操作确认
+- 🛡️ **审批加固**：直连工具 API 默认关闭、SFTP 敏感操作确认（其中的 Host / Origin 校验已于后续版本移除，见「与上游的差异」）
 - 🪟 **焦点与输入法修复**：非阻塞对话框取代原生 `confirm()`，xterm 输入与中文输入法不再失效；后台审批会闪烁任务栏提醒
 - 🔁 **异常退出后重启**：端口占用重试退避 + 陈旧实例优雅移交，避免永久 `EADDRINUSE`
 

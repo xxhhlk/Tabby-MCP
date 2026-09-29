@@ -161,11 +161,11 @@ export class McpService {
 
         // Parse JSON for all routes
         this.app.use(express.json());
-        this.app.use((req, res, next) => {
-            if (this.checkHost(req, res)) {
-                next();
-            }
-        });
+
+        // NOTE (fork): upstream v1.7.1 validates the Host and Origin headers on every
+        // request (DNS-rebinding protection). This fork deliberately removed both layers,
+        // so no request is rejected on the basis of its Host/Origin headers. Access
+        // control now relies solely on the loopback bind in listenOnce().
 
         // Health check endpoint
         this.app.get('/health', (_, res) => {
@@ -234,11 +234,6 @@ export class McpService {
         // ============================================================
 
         this.app.all('/mcp', async (req: Request, res: Response) => {
-            // Validate Origin header for security (DNS rebinding protection)
-            if (!this.checkOrigin(req, res)) {
-                return;
-            }
-
             // GET and DELETE must be handled by the SDK so Accept, protocol version,
             // session validation, single-stream enforcement, and SSE routing all apply.
             if (req.method === 'GET' || req.method === 'DELETE') {
@@ -381,10 +376,6 @@ export class McpService {
 
         // SSE endpoint for legacy MCP clients
         this.app.get('/sse', async (req: Request, res: Response) => {
-            // Same DNS-rebinding protection as /mcp (previously only /mcp was guarded)
-            if (!this.checkOrigin(req, res)) {
-                return;
-            }
             this.logger.info('Legacy SSE: Establishing connection');
 
             // Set headers for SSE
@@ -452,10 +443,6 @@ export class McpService {
 
         // Messages endpoint for legacy SSE transport
         this.app.post('/messages', async (req: Request, res: Response) => {
-            if (!this.checkOrigin(req, res)) {
-                return;
-            }
-
             const sessionId = req.query.sessionId as string;
 
             if (!sessionId) {
@@ -487,62 +474,10 @@ export class McpService {
 
     }
 
-    /**
-     * Shared Origin validation for all MCP endpoints (DNS rebinding protection).
-     * Requests without an Origin header (curl, local CLI bridges) are allowed.
-     * Returns false if the response has already been rejected.
-     */
-    private checkOrigin(req: Request, res: Response): boolean {
-        const origin = req.headers.origin;
-        if (origin && !this.isValidOrigin(origin, req.socket.localPort)) {
-            this.logger.warn(`Rejected request with invalid origin: ${origin}`);
-            res.status(403).json({ error: 'Invalid origin' });
-            return false;
-        }
-        return true;
-    }
-
-    /**
-     * Host header validation. The server listens on IPv4 loopback only, so any
-     * other hostname (or a mismatched port) indicates a rebinding attempt.
-     */
-    private checkHost(req: Request, res: Response): boolean {
-        const host = req.headers.host;
-        try {
-            const parsed = new URL(`http://${host || ''}`);
-            const validHostname = parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost';
-            const validPort = parsed.port === String(req.socket.localPort || this.config.store.mcp?.port || 3001);
-            if (validHostname && validPort) {
-                return true;
-            }
-        } catch {
-            // Reject malformed Host headers below.
-        }
-
-        this.logger.warn(`Rejected request with invalid Host header: ${host || '(missing)'}`);
-        res.status(403).json({ error: 'Invalid host' });
-        return false;
-    }
-
     /** True only for connections originating from this machine's loopback stack */
     private isLoopbackRequest(req: Request): boolean {
         const address = req.socket.remoteAddress;
         return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
-    }
-
-    /**
-     * Validate origin header for security
-     */
-    private isValidOrigin(origin: string, localPort: number | undefined): boolean {
-        try {
-            const url = new URL(origin);
-            const validProtocol = url.protocol === 'http:' || url.protocol === 'https:';
-            const validHostname = url.hostname === '127.0.0.1' || url.hostname === 'localhost';
-            const validPort = url.port === String(localPort || this.config.store.mcp?.port || 3001);
-            return validProtocol && validHostname && validPort;
-        } catch {
-            return false;
-        }
     }
 
     /** JSON-RPC initialize detection (single message or batch) */
@@ -564,9 +499,6 @@ export class McpService {
         this.toolCategories.forEach(category => {
             category.mcpTools.forEach(tool => {
                 this.app.post(`/api/tool/${tool.name}`, async (req: Request, res: Response) => {
-                    if (!this.checkOrigin(req, res)) {
-                        return;
-                    }
                     if (this.config.store.mcp?.directToolApi?.enabled !== true) {
                         res.status(404).json({
                             error: 'Direct tool API is disabled',

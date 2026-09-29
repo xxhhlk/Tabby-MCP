@@ -9,6 +9,9 @@
  *     the CSM wiring rather than for JSON.stringify(processedInput).
  *  2. Dependencies are managed with pnpm (pnpm-lock.yaml), not npm
  *     (package-lock.json), so the lockfile assertion reads the pnpm lockfile.
+ *  3. The Host and Origin header guards (upstream's DNS-rebinding protection)
+ *     were deliberately removed, so the assertions below assert their absence
+ *     instead of their presence. The loopback bind is the remaining control.
  *
  * Everything else matches upstream, including the tool-count assertion, which
  * doubles as a sentinel for accidentally unregistered tools.
@@ -61,7 +64,8 @@ function testLegacySseParsedBody() {
         'Legacy SSE must pass the body already parsed by express.json()'
     );
     assert.match(source, /listen\(serverPort,\s*'127\.0\.0\.1'/, 'Server must bind to loopback only');
-    assert.match(source, /this\.checkOrigin\(req,\s*res\)/, 'MCP endpoints must validate Origin');
+    assert.equal(source.includes('checkOrigin'), false, 'Origin header validation must stay removed (fork)');
+    assert.equal(source.includes('isValidOrigin'), false, 'Origin validation helper must stay removed (fork)');
 }
 
 function testTransportAndLifecycleGuards() {
@@ -71,7 +75,8 @@ function testTransportAndLifecycleGuards() {
         /req\.method === 'GET' \|\| req\.method === 'DELETE'[\s\S]*transport\.handleRequest\(req, res\)/,
         'Streamable HTTP GET and DELETE must be delegated to the SDK transport'
     );
-    assert.match(source, /this\.checkHost\(req, res\)/, 'All HTTP routes must validate the Host header');
+    assert.equal(source.includes('checkHost'), false, 'Host header validation must stay removed (fork)');
+    assert.equal(source.includes('Invalid host'), false, 'Host rejection response must stay removed (fork)');
     assert.match(source, /private startPromise\?: Promise<void>/, 'Concurrent starts must share one pending promise');
     assert.match(source, /private lifecycleGeneration = 0/, 'Stop must be able to cancel an in-flight start');
 }

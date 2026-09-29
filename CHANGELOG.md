@@ -2,6 +2,22 @@
 
 All notable changes to Tabby-MCP will be documented in this file.
 
+## [Unreleased]
+
+### ⚠️ 行为变化
+- **移除 Host 头校验**：不再因 `Host` 不是 `127.0.0.1` / `localhost`（或端口不匹配）而返回 `403 Invalid host`。这是上游 v1.7.1 引入的 DNS rebinding 防护。
+- **移除 Origin 头校验**：`/mcp`、`/sse`、`/messages`、`/api/tool/:name` 不再因 `Origin` 不匹配而返回 `403 Invalid origin`。
+
+移除后**没有任何请求会因 Host / Origin 头被拒**。剩余访问控制：
+
+- 服务仍只绑 `127.0.0.1`（`listenOnce()`）——非本机流量无法建立 TCP 连接；
+- `/internal/shutdown` 仍要求回环来源 + `x-tabby-mcp-control-token`；
+- `/api/tool/:name` 直连 API 默认关闭（需 `directToolApi.enabled = true`）。
+
+`scripts/smoke-test.js` 已同步改为断言这两个校验**不存在**，防止被无意加回。
+
+> ⚠️ MCP 端点本身无鉴权。若日后把监听地址改到非回环接口，必须另行加上访问控制。
+
 ## [1.7.1-fork.1] - 2026-09-28
 
 合并上游 `v1.6.2 → v1.7.1` 的全部功能改动，同时保留本地自研能力。差异说明见 README_CN「与上游的差异」。
