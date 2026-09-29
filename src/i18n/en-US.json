@@ -100,7 +100,7 @@
     "mcp.timing.shellReadyTimeout": "Shell Readiness Probe Timeout (ms)",
     "mcp.timing.shellReadyTimeout.desc": "After a cold tab connects, how long to keep probing (idempotent echo) until the remote shell really consumes input. The shell swallows type-ahead while it initialises (default: 10000)",
     "mcp.timing.autoReconnect": "Auto-reconnect dropped sessions",
-    "mcp.timing.autoReconnect.desc": "When a tab shows \"Press any key to reconnect\" because the connection dropped, trigger Tabby's own reconnect automatically instead of waiting for the timeout. Tabs you disconnected by hand are never reconnected (default: on)",
+    "mcp.timing.autoReconnect.desc": "When a tab shows \"Press any key to reconnect\" because the connection dropped, trigger Tabby's own reconnect automatically instead of waiting for the timeout. Applies to tabs you disconnected by hand too (the response then says reconnectedAfterManualDisconnect); turn this off to leave those alone (default: on)",
     "mcp.connectionInfo.title": "Connection Info",
     "mcp.connectionInfo.streamable": "Streamable HTTP (Recommended):",
     "mcp.connectionInfo.legacySse": "Legacy SSE:",

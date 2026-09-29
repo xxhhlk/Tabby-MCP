@@ -87,7 +87,7 @@ export interface McpConfig {
         sessionPollInterval: number;
         sessionActivationTimeout?: number;   // Local fork: cold-tab activation budget (ms)
         shellReadyTimeout?: number;          // Local fork: shell readiness probe budget (ms)
-        autoReconnect?: boolean;             // Local fork: revive "press any key to reconnect" tabs
+        autoReconnect?: boolean;             // Local fork: revive "press any key to reconnect" tabs (incl. manual disconnect)
     };
     sessionTracking: {
         useStableIds: boolean;

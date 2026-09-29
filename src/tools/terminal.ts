@@ -688,6 +688,7 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
                                     error: live.error,
                                     waitedMs: live.waitedMs,
                                     ...(live.reconnected ? { autoReconnectAttempted: true } : {}),
+                                    ...(live.manualDisconnect ? { reconnectedAfterManualDisconnect: true } : {}),
                                     ...(live.hint ? { hint: live.hint } : {}),
                                     ...(noLocatorWarning ? { warning: noLocatorWarning } : {})
                                 })
@@ -699,6 +700,7 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
                             activatedTab: true,
                             activationWaitMs: live.waitedMs,
                             ...(live.reconnected ? { autoReconnectAttempted: true } : {}),
+                            ...(live.manualDisconnect ? { reconnectedAfterManualDisconnect: true } : {}),
                             ...(live.shellReadyWaitMs !== undefined
                                 ? { shellReadyWaitMs: live.shellReadyWaitMs, probeAttempts: live.probeAttempts }
                                 : {}),
@@ -944,7 +946,7 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
     private async ensureSessionLive(
         session: TerminalSessionWithTab,
         alreadyActivated: boolean
-    ): Promise<{ ok: boolean; activated: boolean; reconnected?: boolean; waitedMs: number; shellReady?: boolean; shellReadyWaitMs?: number; probeAttempts?: number; error?: string; hint?: string }> {
+    ): Promise<{ ok: boolean; activated: boolean; reconnected?: boolean; manualDisconnect?: boolean; waitedMs: number; shellReady?: boolean; shellReadyWaitMs?: number; probeAttempts?: number; error?: string; hint?: string }> {
         const sessionObj = (session.tab as any).session;
 
         if (this.isSessionWritable(session)) {
@@ -980,23 +982,21 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
         const started = Date.now();
         const reconnectState = this.getReconnectState(session);
 
-        if (reconnectState.blockedByUser) {
-            this.logger.warn(`[ensureSessionLive] Session ${session.sessionId} was disconnected manually - not reconnecting`);
-            return {
-                ok: false,
-                activated: alreadyActivated,
-                waitedMs: 0,
-                error: 'Session is disconnected (you pressed "Disconnect" in Tabby) - MCP will not reconnect a tab that was deliberately closed.',
-                hint: 'Click the tab and press any key in Tabby to reconnect, then retry.'
-            };
-        }
+        // A tab the user disconnected by hand ends up in exactly the same
+        // internal state as one whose connection dropped: session === null plus
+        // "press any key to reconnect". Reviving both the same way is simpler and
+        // never leaves an agent stuck on a tab it can see; a deliberate
+        // disconnect is rare and a command aimed at that tab is the stronger
+        // signal. The flag is kept only so the response can say what happened.
+        const manualDisconnect = reconnectState.blockedByUser;
 
         // The tab is sitting on "press any key to reconnect" - nothing else will
         // ever revive it, so trigger the reconnect instead of waiting it out.
         let reconnected = false;
-        if (reconnectState.awaitingReconnect && reconnectState.canReconnect && this.isAutoReconnectEnabled()) {
+        if ((reconnectState.awaitingReconnect || manualDisconnect) && reconnectState.canReconnect && this.isAutoReconnectEnabled()) {
             this.logger.warn(
-                `[ensureSessionLive] Session ${session.sessionId} is awaiting "press any key to reconnect" - triggering tab.reconnect()`
+                `[ensureSessionLive] Session ${session.sessionId} is awaiting "press any key to reconnect"` +
+                `${manualDisconnect ? ' (disconnected by hand in Tabby)' : ''} - triggering tab.reconnect()`
             );
             this.requestReconnect(session);
             reconnected = true;
@@ -1028,6 +1028,7 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
                     ok: true,
                     activated: true,
                     reconnected,
+                    manualDisconnect: manualDisconnect && reconnected,
                     waitedMs,
                     shellReady: shell.ready,
                     shellReadyWaitMs: shell.waitedMs,
@@ -1045,7 +1046,7 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
 
         const diagnosis = kipPending
             ? 'SSH is waiting for keyboard-interactive input (MFA/TOTP) in Tabby.'
-            : reconnectState.awaitingReconnect || reconnected
+            : reconnectState.awaitingReconnect || manualDisconnect || reconnected
                 ? 'The reconnect did not complete - the host may be unreachable or authentication failed.'
                 : 'The tab was restored on startup but its session never connected (no session object / session.open=false).';
 
@@ -1053,6 +1054,7 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
             ok: false,
             activated: true,
             reconnected,
+            manualDisconnect: manualDisconnect && reconnected,
             waitedMs,
             error: `Session not writable after ${waitedMs}ms: ${diagnosis}`,
             hint: kipPending
@@ -1223,6 +1225,7 @@ Special keys: \\x03 (Ctrl+C), \\x04 (Ctrl+D), \\x1b (Escape), \\r (Enter)`,
                                 error: live.error,
                                 waitedMs: live.waitedMs,
                                 ...(live.reconnected ? { autoReconnectAttempted: true } : {}),
+                                ...(live.manualDisconnect ? { reconnectedAfterManualDisconnect: true } : {}),
                                 hint: live.hint ?? 'Input was NOT sent. Inspect/reconnect the tab in Tabby, then retry.'
                             })
                         }]
