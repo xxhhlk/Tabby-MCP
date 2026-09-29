@@ -6,13 +6,13 @@
  *       用于回归测试会话定位、聚焦状态等逻辑（如 isFocusedPane 唯一性、exec_command 定位）。
  *
  * 用法：
- *   node scripts/mcp-test.cjs list [--port 34266]
+ *   node scripts/mcp-test.cjs list [--host 127.0.0.1] [--port 34266]
  *      列出服务器全部工具
- *   node scripts/mcp-test.cjs call <toolName> '<jsonArgs>' [--port 34266]
+ *   node scripts/mcp-test.cjs call <toolName> '<jsonArgs>' [--host H] [--port N]
  *      调用工具。示例：
  *        node scripts/mcp-test.cjs call get_session_list '{}'
  *        node scripts/mcp-test.cjs call exec_command '{"command":"hostname","sessionId":"<id>"}'
- *   node scripts/mcp-test.cjs regress [--port 34266]
+ *   node scripts/mcp-test.cjs regress [--host H] [--port N]
  *      回归测试（自动断言，非零退出码 = 失败）：
  *        1. tools/list
  *        2. get_session_list isFocusedPane 唯一性
@@ -23,7 +23,7 @@
  *        6. 随机多切 3 个标签，逐个验证聚焦唯一迁移
  *        7. 随机多切后 exec_command 无 locator → 落在最后一个随机目标
  *        最后自动恢复原聚焦会话（不改变你的界面状态）
- *   node scripts/mcp-test.cjs verify [--port 34266]
+ *   node scripts/mcp-test.cjs verify [--host H] [--port N]
  *      全面验证（10 步 + 4 项新增能力）：list_tabs 互通字段、exec_command 四种定位方式
  *      （sessionId/tabId/title/tabIndex）、无效 sessionId 错误行为、get_terminal_buffer、
  *      select_tab(tabId) 聚焦迁移；末尾恢复原聚焦会话。
@@ -31,7 +31,13 @@
  *        H1 submit_keyboard_interactive_response 无 prompt → 拒绝分支
  *        H2 GET /health 返回 instanceId
  *        H3 POST /api/tool/:name 默认关闭（404）
- *        H4 127.0.0.1 连通性（并记录 localhost 可达性）
+ *        H4 目标主机连通性（默认 127.0.0.1；并记录 localhost 可达性）
+ *
+ * 主机（--host / MCP_TEST_HOST，默认 127.0.0.1）：
+ *   服务端只绑 127.0.0.1，本机直接跑用默认值即可。若脚本跑在另一台机器或沙箱里，
+ *   127.0.0.1 指的是脚本自己而不是 Tabby 宿主，此时必须填宿主的可达地址，例如
+ *     node scripts/mcp-test.cjs verify --host 192.168.56.8
+ *   或用环境变量：MCP_TEST_HOST=192.168.56.8 node scripts/mcp-test.cjs verify
  *
  * 注意（审批会阻塞自动化）：
  *   结对编程模式开启且勾选确认时，exec_command / send_input / SFTP 操作会弹出确认框，
@@ -52,13 +58,21 @@ const http = require('http');
 
 // ---------- 参数解析 ----------
 const argv = process.argv.slice(2);
-const cmd = argv.find(a => !a.startsWith('--')) || 'list';
+// 子命令 = 第一个非 --flag、且不是某个 flag 的取值 的参数
+const VALUE_FLAGS = ['--port', '--host'];
+const cmd = argv.find((a, i) => !a.startsWith('--') && !VALUE_FLAGS.includes(argv[i - 1])) || 'list';
 const portIdx = argv.indexOf('--port');
 const PORT = portIdx !== -1 ? parseInt(argv[portIdx + 1], 10) : 34266;
 // 服务器只绑 127.0.0.1（见 mcpService.listenOnce）。用 localhost 在部分环境下
-// 会解析成 IPv6 ::1 而连不上，所以这里固定用 IPv4 回环地址。
-const SERVER_URL = `http://127.0.0.1:${PORT}/mcp`;
-const BASE_URL = `http://127.0.0.1:${PORT}`;
+// 会解析成 IPv6 ::1 而连不上，所以默认固定用 IPv4 回环地址。
+//
+// --host 用于「脚本跑在另一台机器 / 沙箱里」的场景：此时 127.0.0.1 指向的是脚本
+// 自己而不是 Tabby 所在的宿主，需要填宿主的可达地址（例如虚拟机的 host-only IP）。
+// 也可以直接用环境变量 MCP_TEST_HOST。
+const hostIdx = argv.indexOf('--host');
+const HOST = hostIdx !== -1 ? argv[hostIdx + 1] : (process.env.MCP_TEST_HOST || '127.0.0.1');
+const SERVER_URL = `http://${HOST}:${PORT}/mcp`;
+const BASE_URL = `http://${HOST}:${PORT}`;
 
 // ---------- 连接 ----------
 async function connect() {
@@ -88,7 +102,7 @@ function extractText(result) {
 // ---------- HTTP 直连辅助（/health、/api/tool 等非 MCP 端点） ----------
 function httpGet(path) {
     return new Promise((resolve) => {
-        const req = http.get({ host: '127.0.0.1', port: PORT, path, timeout: 4000 }, (res) => {
+        const req = http.get({ host: HOST, port: PORT, path, timeout: 4000 }, (res) => {
             let body = '';
             res.on('data', c => { body += c; });
             res.on('end', () => resolve({ status: res.statusCode, body }));
@@ -98,7 +112,7 @@ function httpGet(path) {
     });
 }
 
-/** 探测主机是否可达（用于对比 127.0.0.1 与 localhost） */
+/** 探测主机是否可达（用于对比目标主机与 localhost 的解析差异） */
 function probeHost(host) {
     return new Promise((resolve) => {
         const req = http.get({ host, port: PORT, path: '/health', timeout: 4000 }, (res) => {
@@ -115,7 +129,7 @@ function httpPost(path, body) {
     return new Promise((resolve) => {
         const payload = JSON.stringify(body || {});
         const req = http.request({
-            host: '127.0.0.1', port: PORT, path, method: 'POST', timeout: 4000,
+            host: HOST, port: PORT, path, method: 'POST', timeout: 4000,
             headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
         }, (res) => {
             let data = '';
@@ -491,12 +505,12 @@ async function cmdVerify() {
         console.log(`[H3] POST /api/tool/exec_command → status=${direct.status} ${okDirect ? '✓ 默认关闭' : '✗ 期望 404'}`);
         if (!okDirect) { console.error(`  ✗ FAIL: 直连工具 API 应默认关闭（404），实际 ${direct.status}: ${String(direct.body).slice(0, 120)}`); failed = true; }
 
-        // H4) 回环连通性：127.0.0.1 必达；localhost 仅记录（服务只绑 IPv4 回环）
-        const loop4 = await probeHost('127.0.0.1');
+        // H4) 目标主机连通性：HOST 必达（默认 127.0.0.1）；localhost 仅记录
+        const loop4 = await probeHost(HOST);
         const loopName = await probeHost('localhost');
-        console.log(`[H4] 回环连通性 → 127.0.0.1: ${loop4.ok ? '✓ 可达' : '✗ ' + loop4.error} | localhost: ${loopName.ok ? '可达' : '不可达(' + loopName.error + ')'}`);
-        if (!loop4.ok) { console.error('  ✗ FAIL: 127.0.0.1 不可达'); failed = true; }
-        if (!loopName.ok) {
+        console.log(`[H4] 连通性 → ${HOST}: ${loop4.ok ? '✓ 可达' : '✗ ' + loop4.error} | localhost: ${loopName.ok ? '可达' : '不可达(' + loopName.error + ')'}`);
+        if (!loop4.ok) { console.error(`  ✗ FAIL: ${HOST} 不可达`); failed = true; }
+        if (HOST === '127.0.0.1' && !loopName.ok) {
             console.log('  ℹ localhost 不可达属预期（服务只绑 127.0.0.1），本脚本已固定使用 127.0.0.1');
         }
     } finally {
