@@ -23,6 +23,22 @@ const requireLocator = (p: any) => !!(p?.sessionId || p?.tabId || p?.tabIndex !=
 const LOCATOR_REQUIRED_MSG = 'At least one target is required: sessionId, tabId, tabIndex, title or profileName. Run get_session_list first to obtain a sessionId, then pass it explicitly.';
 
 /**
+ * Leading blanks prepended to every command and readiness probe we type.
+ *
+ * While a remote shell is starting up - on first connect AND after a reconnect -
+ * it drops the FIRST byte of each write it receives. Measured on a real host:
+ * `echo MCPR""EADY...` was echoed in full by the pty, but bash reported
+ * `-bash: cho: command not found`, i.e. it only ever received `cho`. Four probe
+ * attempts in a row lost exactly that one byte, and the next one was clean.
+ *
+ * Leading whitespace is ignored by every shell we support (bash / zsh / fish /
+ * sh / PowerShell), so a swallowed byte only eats a blank and the command still
+ * runs - which also means probe success now implies the real command survives.
+ * Bonus: bash's HISTCONTROL=ignorespace keeps these out of the shell history.
+ */
+const COMMAND_PREFIX = '    ';
+
+/**
  * Terminal session with stable ID for tracking
  * Enhanced to support split pane identification
  */
@@ -687,14 +703,14 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
                                 ? { shellReadyWaitMs: live.shellReadyWaitMs, probeAttempts: live.probeAttempts }
                                 : {}),
                             ...(live.shellReady === false
-                                ? { shellReadyWarning: 'Shell never confirmed it consumes input - if the output is empty, retry the command.' }
+                                ? { shellReadyWarning: 'Shell readiness probe timed out; the command was sent anyway. Do NOT re-run it just because of this - check the output first.' }
                                 : {})
                         }
                         : {};
 
                     // For non-waiting mode, just send the command
                     if (!waitForOutput) {
-                        session.tab.sendInput(command + this.getEnterKey());
+                        session.tab.sendInput(COMMAND_PREFIX + command + this.getEnterKey());
                         this.logger.info(`Sent command (async): ${command} in session ${session.sessionId}`);
                         return {
                             content: [{
@@ -744,10 +760,13 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
                         }
                     }
 
-                    // Send command with markers - use shell-aware wrapper
+                    // Send command with markers - use shell-aware wrapper.
+                    // COMMAND_PREFIX mirrors the probe's prefix: a shell that just
+                    // came up swallows the first byte of a write, so the probe can
+                    // only prove the command will run if both carry the same prefix.
                     const detectedShell = this.detectShellType(session);
                     const wrappedCommand = this.getWrappedCommand(command, startMarker, endMarker, detectedShell);
-                    session.tab.sendInput(wrappedCommand + this.getEnterKey());
+                    session.tab.sendInput(COMMAND_PREFIX + wrappedCommand + this.getEnterKey());
 
                     this.logger.info(`Executing command: ${command} in session ${session.sessionId} (shell: ${detectedShell}, stream: ${!!outputStream$})`);
 
@@ -1128,7 +1147,8 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
                 // A previous probe may be sitting unsubmitted on the input line.
                 session.tab.sendInput('\x03');
             }
-            session.tab.sendInput(`echo ${typed}${this.getEnterKey()}`);
+            // COMMAND_PREFIX absorbs the first-byte loss of a starting shell.
+            session.tab.sendInput(`${COMMAND_PREFIX}echo ${typed}${this.getEnterKey()}`);
 
             const attemptDeadline = Math.min(started + budget, Date.now() + perAttempt);
             while (Date.now() < attemptDeadline) {
@@ -1655,7 +1675,7 @@ Session targeting: sessionId > tabId > tabIndex > title > profileName`,
         try {
             const startMarker = `__MCP_ENV_START_${Date.now()}__`;
             const endMarker = `__MCP_ENV_END_${Date.now()}__`;
-            const wrappedCommand = this.getWrappedCommand(command, startMarker, endMarker, shell);
+            const wrappedCommand = COMMAND_PREFIX + this.getWrappedCommand(command, startMarker, endMarker, shell);
             session.tab.sendInput(wrappedCommand + '\n');
             const result = await this.waitForCommandOutputViaBuffer(session, startMarker, endMarker, 3000, () => false);
             const match = result.output.match(/__MCP_ENV__:(.+?):__MCP_ENV__/);
