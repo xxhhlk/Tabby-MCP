@@ -60,6 +60,11 @@ export class TerminalToolCategory extends BaseToolCategory {
     // Shell type cache per session (avoids repeated detection)
     private shellTypeCache = new Map<string, 'bash' | 'zsh' | 'fish' | 'sh' | 'powershell'>();
 
+    // Session objects whose shell has confirmed (via the idempotent echo probe)
+    // that it consumes input. Keyed by the session *object* on purpose: a
+    // reconnect produces a new one, so readiness is re-established automatically.
+    private shellReadySessions = new WeakSet<object>();
+
     // Command security manager (lazy initialized)
     private securityManager?: CommandSecurityManager;
 
@@ -921,7 +926,32 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
         session: TerminalSessionWithTab,
         alreadyActivated: boolean
     ): Promise<{ ok: boolean; activated: boolean; reconnected?: boolean; waitedMs: number; shellReady?: boolean; shellReadyWaitMs?: number; probeAttempts?: number; error?: string; hint?: string }> {
+        const sessionObj = (session.tab as any).session;
+
         if (this.isSessionWritable(session)) {
+            // Writable != ready. A session object that appeared *between* two MCP
+            // calls - e.g. select_tab on a cold tab, then exec_command - is already
+            // `open` while the remote shell is still running its profile, and bash
+            // discards type-ahead written in that window. The old code returned
+            // here immediately, so that command vanished and only surfaced as
+            // "Command timeout" with empty output.
+            //
+            // Probe once per session object to rule it out. isProbeSafe() keeps
+            // this off sessions that are already running an interactive program.
+            if (sessionObj && !this.shellReadySessions.has(sessionObj) && this.isProbeSafe(session)) {
+                const shell = await this.waitForShellReady(session);
+                if (shell.ready) {
+                    this.shellReadySessions.add(sessionObj);
+                }
+                return {
+                    ok: true,
+                    activated: alreadyActivated,
+                    waitedMs: 0,
+                    shellReady: shell.ready,
+                    shellReadyWaitMs: shell.waitedMs,
+                    probeAttempts: shell.attempts
+                };
+            }
             return { ok: true, activated: alreadyActivated, waitedMs: 0 };
         }
 
@@ -968,6 +998,13 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
                 // Writable != ready: the remote shell is still initialising and
                 // swallows type-ahead written during that window (see below).
                 const shell = await this.waitForShellReady(session);
+                if (shell.ready) {
+                    // Remember this session object so later calls skip the probe.
+                    const liveObj = (session.tab as any).session;
+                    if (liveObj) {
+                        this.shellReadySessions.add(liveObj);
+                    }
+                }
                 return {
                     ok: true,
                     activated: true,
@@ -1006,6 +1043,49 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
     }
 
     /**
+     * Cheap, passive check: is it safe to type an `echo` probe into this session?
+     *
+     * The readiness probe writes text to the terminal, so it must stay away from
+     * sessions that are already running an interactive program:
+     *
+     *   - a full-screen app (vim / less / top / man / htop) owns the alternate
+     *     screen buffer - typing there edits the file or scrolls the pager;
+     *   - a REPL (python / node / mysql / ...) would execute the probe text as
+     *     code.
+     *
+     * Everything else is safe: a shell prompt, and equally a tab whose shell has
+     * not printed a prompt yet - the latter being exactly the case the probe
+     * exists for.
+     *
+     * Both checks are read-only. A session that fails the check is simply left
+     * unconfirmed, so the probe is retried on the next command - once the user
+     * quits vim, the next call probes normally.
+     */
+    private isProbeSafe(session: TerminalSessionWithTab): boolean {
+        try {
+            const frontend = session.tab.frontend as XTermFrontend;
+            const xtermInstance = (frontend as any)?.xterm;
+            if (xtermInstance?.buffer?.active?.type === 'alternate') {
+                this.logger.debug(`[isProbeSafe] alternate screen buffer active - skipping probe for ${session.sessionId}`);
+                return false;
+            }
+        } catch (e: any) {
+            // An unreadable buffer must not block the probe - that would bring
+            // back the silent command drop this whole path exists to prevent.
+            this.logger.debug(`[isProbeSafe] buffer check failed for ${session.sessionId}: ${e?.message ?? e}`);
+        }
+
+        const parsed = this.parseEnvironmentFromBuffer(session, this.getTerminalBufferText(session), true);
+        const repls = ['python', 'ruby', 'mysql', 'postgres', 'sqlite', 'mongodb', 'redis', 'node'];
+        if (repls.includes(parsed.environment)) {
+            this.logger.debug(`[isProbeSafe] ${parsed.environment} REPL detected - skipping probe for ${session.sessionId}`);
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
      * Wait until the shell on the other end really consumes input.
      *
      * `session.open === true` only means the SSH channel is up. The remote shell
@@ -1021,8 +1101,9 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
      * actually executed it prints the joined form (both bash and PowerShell strip
      * the empty quotes). Retrying is safe: `echo` has no side effects.
      *
-     * Runs only on the cold path (a session that just came up), where no
-     * interactive program can be running yet, so the probe cannot disturb state.
+     * Callers must gate this with isProbeSafe(): the probe is safe on a shell
+     * that is still starting up, but must never be typed into a full-screen app
+     * or a REPL. ensureSessionLive() is the only caller and does exactly that.
      */
     private async waitForShellReady(
         session: TerminalSessionWithTab
