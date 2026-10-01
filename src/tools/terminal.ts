@@ -934,6 +934,39 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
     }
 
     /**
+     * Track when MCP last kicked off a programmatic connect for a tab.
+     *
+     * SSH's initializeSession() has no re-entrancy guard, so firing reconnect()
+     * while the previous attempt is still running would open a second SSH
+     * connection (the first one is never destroyed - `reconnect()` can only
+     * destroy an existing `session`, which is still null during the connect).
+     * The attempt settles within the profile's readyTimeout (ssh2 default 20s)
+     * plus handshake overhead, so stay quiet a little longer than that.
+     */
+    private connectAttempts = new WeakMap<object, number>();
+
+    private mayRetryConnect(tab: any): boolean {
+        try {
+            const last = this.connectAttempts.get(tab);
+            if (last === undefined) {
+                return true;
+            }
+            const readyTimeout = Number(tab?.profile?.options?.readyTimeout) || 20000;
+            return Date.now() - last >= readyTimeout + 2000;
+        } catch {
+            return true;
+        }
+    }
+
+    private markConnectAttempt(tab: any): void {
+        try {
+            this.connectAttempts.set(tab, Date.now());
+        } catch {
+            // best effort only
+        }
+    }
+
+    /**
      * Guarantee the target session can receive input, activating the tab first
      * when it is still cold (restored but never focused), and driving Tabby's
      * "press any key to reconnect" prompt when the session was lost.
@@ -978,9 +1011,17 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
 
         const timing = this.config.store.mcp?.timing || {};
         const pollInterval = timing.sessionPollInterval ?? 200;
-        const timeout = timing.sessionActivationTimeout ?? 20000;
+        const timeout = timing.sessionActivationTimeout ?? 30000;
         const started = Date.now();
         const reconnectState = this.getReconnectState(session);
+        const tabAny = session.tab as any;
+
+        // Snapshot BEFORE activation. A cold (restored, never focused) tab has no
+        // frontend yet, and focusing it is what creates one: attach ->
+        // onFrontendReady -> initializeSession. A tab that is ALREADY attached
+        // never runs that path again, so if its connection attempt failed there
+        // is nothing left to retry it (see the third branch below).
+        const attachedBeforeActivation = Boolean(tabAny?.frontend);
 
         // A tab the user disconnected by hand ends up in exactly the same
         // internal state as one whose connection dropped: session === null plus
@@ -998,6 +1039,27 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
                 `[ensureSessionLive] Session ${session.sessionId} is awaiting "press any key to reconnect"` +
                 `${manualDisconnect ? ' (disconnected by hand in Tabby)' : ''} - triggering tab.reconnect()`
             );
+            this.markConnectAttempt(tabAny);
+            this.requestReconnect(session);
+            reconnected = true;
+        } else if (attachedBeforeActivation && reconnectState.canReconnect && this.isAutoReconnectEnabled() && this.mayRetryConnect(tabAny)) {
+            // Third state: the tab was connected, the link dropped, and Tabby's
+            // own reconnect attempt died at the socket level ("os error 10060" /
+            // "10061"). SSH's initializeSession() throws before ever calling
+            // setSession(), so onSessionDestroyed() never fires and Tabby offers
+            // NOTHING: no "press any key to reconnect" prompt, reconnectOffered
+            // stays false. Without this branch the tab stays dead until a human
+            // picks Reconnect from the tab menu - every MCP call just waits out
+            // its timeout and reports the misleading "restored on startup" cause.
+            //
+            // Gated on the pre-activation frontend snapshot: a cold tab must not
+            // be reconnected here, because its in-flight initializeSession() has
+            // no re-entrancy guard and we would open a second SSH connection.
+            this.logger.warn(
+                `[ensureSessionLive] Session ${session.sessionId} has no session and no reconnect prompt ` +
+                `(the last connect attempt failed) - triggering tab.reconnect()`
+            );
+            this.markConnectAttempt(tabAny);
             this.requestReconnect(session);
             reconnected = true;
         }

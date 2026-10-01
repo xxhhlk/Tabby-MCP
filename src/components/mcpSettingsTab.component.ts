@@ -459,7 +459,7 @@ import { PLUGIN_VERSION } from '../version';
       <div class="form-group">
         <label>{{ t('mcp.timing.sessionActivationTimeout') }}</label>
         <input type="number" class="form-control" [(ngModel)]="config.store.mcp.timing.sessionActivationTimeout" 
-               placeholder="20000" min="1000" max="120000" (change)="saveConfig()">
+               placeholder="30000" min="1000" max="120000" (change)="saveConfig()">
         <small class="form-text text-muted">{{ t('mcp.timing.sessionActivationTimeout.desc') }}</small>
       </div>
 
@@ -900,7 +900,7 @@ export class McpSettingsTabComponent implements OnInit, OnDestroy {
         initialDelay: 0,
         sessionStableChecks: 5,
         sessionPollInterval: 200,
-        sessionActivationTimeout: 20000,
+        sessionActivationTimeout: 30000,
         shellReadyTimeout: 10000,
         autoReconnect: true
       };
@@ -1118,7 +1118,7 @@ export class McpSettingsTabComponent implements OnInit, OnDestroy {
         initialDelay: 0,
         sessionStableChecks: 5,
         sessionPollInterval: 200,
-        sessionActivationTimeout: 20000,
+        sessionActivationTimeout: 30000,
         shellReadyTimeout: 10000,
         autoReconnect: true
       };

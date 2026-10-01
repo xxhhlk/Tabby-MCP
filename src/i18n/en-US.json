@@ -96,7 +96,7 @@
     "mcp.timing.sessionPollInterval": "Session Poll Interval (ms)",
     "mcp.timing.sessionPollInterval.desc": "Interval for session ready polling (default: 200)",
     "mcp.timing.sessionActivationTimeout": "Cold Tab Activation Timeout (ms)",
-    "mcp.timing.sessionActivationTimeout.desc": "How long to wait for a restored (not yet focused) tab to create and connect its session before failing the command (default: 20000)",
+    "mcp.timing.sessionActivationTimeout.desc": "How long to wait for a restored (not yet focused) tab - or a tab whose last connect attempt failed - to create and connect its session before failing the command. Keep it above the SSH profile's own readyTimeout (20000), otherwise MCP gives up before the client does (default: 30000)",
     "mcp.timing.shellReadyTimeout": "Shell Readiness Probe Timeout (ms)",
     "mcp.timing.shellReadyTimeout.desc": "After a cold tab connects, how long to keep probing (idempotent echo) until the remote shell really consumes input. The shell swallows type-ahead while it initialises (default: 10000)",
     "mcp.timing.autoReconnect": "Auto-reconnect dropped sessions",
