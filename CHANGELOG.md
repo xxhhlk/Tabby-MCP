@@ -4,16 +4,23 @@ All notable changes to Tabby-MCP will be documented in this file.
 
 ## [Unreleased]
 
-## [1.7.1-fork.2] - 2026-10-05
+## [1.7.1-fork.3] - 2026-10-05
 
 ### 🐛 Fixed
-- **PowerShell 的 cmdlet 非终止错误被报成成功**：`getWrappedCommand` 的 PS 分支里 `elseif (-not $?)` 读到的 `$?` 已经被前面 `if ($LASTEXITCODE -ne 0)` 的条件求值覆盖成 True，于是 `Get-ChildItem C:\nope` 这类错误返回 `success:true / exitCode:0`（错误文本只在 output 里）。改为在 `Invoke-Expression` 的**下一条语句**先快照 `$mcp_ok = $?`，再走 `$LASTEXITCODE` → `$mcp_ok` → `catch` 三级判定。实测：cmdlet 成功 0、原生退出码透传（`cmd /c exit 7` → 7）、cmdlet 报错 → 1。
+- **PowerShell 的 cmdlet 非终止错误被报成成功**：`Get-ChildItem C:\nope` 这类命令返回 `success:true / exitCode:0`（错误文本只在 output 里），代理会误判为执行成功。
+  - **真因（PS 5.1.19041.7725 实测）**：`Invoke-Expression` 自己是个 cmdlet，它返回之后 `$?` 描述的是**它自己**的成功，与内部命令无关：
+    - `Invoke-Expression 'Get-Item C:\nope'` → `$?` = **True**
+    - `Invoke-Expression 'Get-Item C:\nope; $x = $?'` → `$x` = **False**
+  - 故 `$?` 快照必须**放进被 eval 的 payload 内**（紧跟用户命令之后），在 `Invoke-Expression` 外面取永远取不到内层失败。修法：`Invoke-Expression '${cmd}; $mcp_ok = $?'`，并用 `$mcp_ok = $true` 预置——命令以 `#comment` 结尾时追加语句会被注释吞掉，此时退化为只看 `$LASTEXITCODE`，不会读到脏值。（命令以 `;` 结尾无碍：PS 5.1 接受 `;;`。）
+  - 实测：cmdlet 报错 → 1，cmdlet 成功 → 0，原生退出码透传（`cmd /c exit 7` → 7）。
+  - 注：fork.2 里试过「在 `Invoke-Expression` 之后快照 `$?`」，实测无效（上表第一行），已被 fork.3 取代。
 
 ### 🔧 Changed
-- `scripts/smoke-test.js` 新增第 9 项检查 **PowerShell support**（8 → 9）：断言 PS 包装分支、`Invoke-Expression`、`$?` 快照位置、`getEnterKey()` 的 CR/LF 分支、`COMMAND_PREFIX`、`detectShellType` 的 PS prompt 正则，以及环境探针对 PowerShell 的短路。这组能力**只有本 fork 有**（上游 v1.6.2 / v1.7.1 均无），且一旦从 npm 装回原版就会整组消失——2026-10-05 就是这样复发过一次，故用反向断言钉住。
+- `scripts/smoke-test.js` 新增第 9 项检查 **PowerShell support**（8 → 9）：断言 PS 包装分支、`Invoke-Expression`、`$?` 快照必须在 payload 内（并反向断言「不得在 `Invoke-Expression` 之后快照」）、`$mcp_ok` 预置、`getEnterKey()` 的 CR/LF 分支、`COMMAND_PREFIX`、`detectShellType` 的 PS prompt 正则，以及环境探针对 PowerShell 的短路。这组能力**只有本 fork 有**（上游 v1.6.2 / v1.7.1 均无），且一旦从 npm 装回原版就会整组消失——2026-10-05 就是这样复发过一次，故用反向断言钉住。
 
 ### ⚠️ 部署注意
 - 运行时插件若从 npm registry 重装，会被换成无 PS 支持的原版。`%APPDATA%\tabby\plugins\package.json` 的依赖请指向 fork tarball（`file:` 形式），见仓库外脚本 `tabby-mcp-fork/pin-fork-plugin.cjs`。
+- 每次重建都请**递增版本号**：`/health` 直接报 `package.json` 的 version，这是判断线上跑的是哪次构建的唯一廉价手段。
 
 ### ⚠️ 行为变化
 - **移除 Host 头校验**：不再因 `Host` 不是 `127.0.0.1` / `localhost`（或端口不匹配）而返回 `403 Invalid host`。这是上游 v1.7.1 引入的 DNS rebinding 防护。

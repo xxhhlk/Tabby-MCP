@@ -344,7 +344,7 @@ export class TerminalToolCategory extends BaseToolCategory {
      * - fish: eval "..." with backslash escaping, $status for exit code
      * - powershell: Invoke-Expression (PS 5.1 compatible, no && / eval),
      *   exit code from $LASTEXITCODE (native exes) falling back to a $?
-     *   snapshot taken immediately after the command (cmdlets)
+     *   snapshot taken inside the evaluated payload (cmdlets)
      */
     private getWrappedCommand(
         command: string,
@@ -358,15 +358,23 @@ export class TerminalToolCategory extends BaseToolCategory {
                 // Reset $LASTEXITCODE so stale values from previous native
                 // commands don't shadow $? of cmdlet-only failures.
                 //
-                // $? MUST be snapshotted on the statement right after
-                // Invoke-Expression: $? describes the last statement executed,
-                // and evaluating the `if` condition below is itself a statement,
-                // so a `$?` read inside the elseif would always see the
-                // comparison's own success. That made every non-terminating
-                // cmdlet error (`Get-ChildItem C:\nope`) report exit code 0,
-                // i.e. success:true with an error message in the output.
+                // $? MUST be captured *inside* the evaluated payload, as the
+                // statement right after the user's command. Invoke-Expression is
+                // itself a cmdlet, so once it returns, $? describes ITS success.
+                // Measured on PS 5.1 (5.1.19041.7725):
+                //   Invoke-Expression 'Get-Item C:\nope'            ; $? -> True
+                //   Invoke-Expression 'Get-Item C:\nope; $x = $?'   ; $x -> False
+                // A snapshot taken outside therefore never sees the inner
+                // failure, and every non-terminating cmdlet error came back as
+                // exit code 0 - success:true with the error text in the output.
+                //
+                // $mcp_ok is pre-seeded because a trailing `#comment` in the
+                // user's command swallows the appended statement (measured); in
+                // that case we fall back to $LASTEXITCODE alone rather than
+                // reading a stale value. A trailing `;` is harmless: PS 5.1
+                // accepts `;;`.
                 const psEscaped = command.replace(/'/g, "''");
-                return `Write-Output "${startMarker}"; $mcp_ec = 0; try { $global:LASTEXITCODE = 0; Invoke-Expression '${psEscaped}'; $mcp_ok = $?; if ($LASTEXITCODE -ne 0) { $mcp_ec = $LASTEXITCODE } elseif (-not $mcp_ok) { $mcp_ec = 1 } } catch { $mcp_ec = 1 }; Write-Output "${endMarker} $mcp_ec"`;
+                return `Write-Output "${startMarker}"; $mcp_ec = 0; $mcp_ok = $true; try { $global:LASTEXITCODE = 0; Invoke-Expression '${psEscaped}; $mcp_ok = $?'; if ($LASTEXITCODE -ne 0) { $mcp_ec = $LASTEXITCODE } elseif (-not $mcp_ok) { $mcp_ec = 1 } } catch { $mcp_ec = 1 }; Write-Output "${endMarker} $mcp_ec"`;
             }
 
             case 'fish':

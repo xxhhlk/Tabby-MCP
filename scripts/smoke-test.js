@@ -200,13 +200,23 @@ function testPowerShellSupport() {
     );
     assert.match(
         wrapper,
-        /Invoke-Expression '\$\{psEscaped\}'; \$mcp_ok = \$\?;/,
-        'The PS wrapper must snapshot $? on the statement right after Invoke-Expression'
+        /Invoke-Expression '\$\{psEscaped\}; \$mcp_ok = \$\?';/,
+        'The PS wrapper must capture $? INSIDE the payload: Invoke-Expression masks it once it returns'
+    );
+    assert.equal(
+        /Invoke-Expression '\$\{psEscaped\}'; \$mcp_ok = \$\?;/.test(wrapper),
+        false,
+        'The PS wrapper must not snapshot $? after Invoke-Expression returns (it is always True there)'
+    );
+    assert.match(
+        wrapper,
+        /\$mcp_ok = \$true;/,
+        'The PS wrapper must pre-seed $mcp_ok so a trailing #comment in the command cannot leave it unset'
     );
     assert.equal(
         /elseif \(-not \$\?\)/.test(wrapper),
         false,
-        'The PS wrapper must not read $? after a condition has been evaluated (it would always be true)'
+        'The PS wrapper must not read $? after a condition has been evaluated'
     );
     assert.match(
         terminal,
