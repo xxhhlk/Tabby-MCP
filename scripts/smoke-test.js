@@ -210,8 +210,13 @@ function testPowerShellSupport() {
     );
     assert.match(
         wrapper,
-        /\$mcp_ok = \$true;/,
-        'The PS wrapper must pre-seed $mcp_ok so a trailing #comment in the command cannot leave it unset'
+        /\$mcp_ok = \$null; \$mcp_e0 = \$Error\.Count;/,
+        'The PS wrapper must pre-seed $mcp_ok to $null and baseline $Error, so a trailing #comment is detectable'
+    );
+    assert.match(
+        wrapper,
+        /elseif \(\$null -eq \$mcp_ok\) \{ if \(\$Error\.Count -gt \$mcp_e0\) \{ \$mcp_ec = 1 \} \}/,
+        'A trailing #comment swallows the $? snapshot; the wrapper must then fall back to the $Error count delta'
     );
     assert.equal(
         /elseif \(-not \$\?\)/.test(wrapper),

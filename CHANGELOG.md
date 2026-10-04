@@ -4,6 +4,18 @@ All notable changes to Tabby-MCP will be documented in this file.
 
 ## [Unreleased]
 
+## [1.7.1-fork.4] - 2026-10-05
+
+### 🐛 Fixed
+- **命令以 `#` 注释结尾时失败仍报 `exitCode:0`**（fork.3 的残留缺口）：`$mcp_ok` 的追加语句 `; $mcp_ok = $?` 被行尾注释吞掉，`$mcp_ok` 停在预置的 `$true`，于是 `Get-Item C:\nope  # comment` 报 `success:true`。
+  - 修法：把预置值改成 `$null` 并记录 `$mcp_e0 = $Error.Count` 基线；判定时 `$null -eq $mcp_ok` 说明快照被吞，此时按 `$Error.Count - $mcp_e0` 判失败（非终止错误必然进 `$Error`）。三级判定变为 `$LASTEXITCODE` → `$null` 哨兵/`$Error` 增量 → `$mcp_ok` → `catch`。
+  - 实测（PS 5.1.19041.7725，手搓同构包装）：无注释报错 → 1、`Test-Path` → 0、`cmd /c exit 7` → 7、管道多行 → 0、**尾注释报错 → 1**。
+  - **已知代价**：调用方显式静默的错误（`-ErrorAction SilentlyContinue`）同样会写入 `$Error`，若又恰逢行尾注释则误报 1。取舍理由：对 agent 工具而言「响亮的假失败」优于「静默的假成功」。
+  - 另记：曾考虑用换行替代 `;` 追加快照，实测**不可行**——包装把命令塞进单引号串，控制台解析器按行切分，含字面换行的命令会报 `UnexpectedToken` 并超时。
+
+### 🔧 Changed
+- `scripts/smoke-test.js` 第 9 项 **PowerShell support** 同步：断言改为 `$mcp_ok = $null; $mcp_e0 = $Error.Count;` 预置 + `$null` 哨兵/`$Error` 增量回退分支。
+
 ## [1.7.1-fork.3] - 2026-10-05
 
 ### 🐛 Fixed

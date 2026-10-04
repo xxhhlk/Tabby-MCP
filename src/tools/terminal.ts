@@ -368,13 +368,18 @@ export class TerminalToolCategory extends BaseToolCategory {
                 // failure, and every non-terminating cmdlet error came back as
                 // exit code 0 - success:true with the error text in the output.
                 //
-                // $mcp_ok is pre-seeded because a trailing `#comment` in the
-                // user's command swallows the appended statement (measured); in
-                // that case we fall back to $LASTEXITCODE alone rather than
-                // reading a stale value. A trailing `;` is harmless: PS 5.1
-                // accepts `;;`.
+                // A trailing `#comment` in the user's command swallows the
+                // appended statement (measured), leaving $mcp_ok unset. It is
+                // pre-seeded to $null so that case is detectable, and the
+                // wrapper then falls back to the $Error count delta - a
+                // non-terminating error always appends to $Error. Trade-off:
+                // an error the caller silenced on purpose (-ErrorAction
+                // SilentlyContinue) still appends to $Error, so a *silenced*
+                // failure followed by a trailing comment reports 1. For an
+                // agent-facing tool a loud false failure beats a silent false
+                // success. A trailing `;` is harmless: PS 5.1 accepts `;;`.
                 const psEscaped = command.replace(/'/g, "''");
-                return `Write-Output "${startMarker}"; $mcp_ec = 0; $mcp_ok = $true; try { $global:LASTEXITCODE = 0; Invoke-Expression '${psEscaped}; $mcp_ok = $?'; if ($LASTEXITCODE -ne 0) { $mcp_ec = $LASTEXITCODE } elseif (-not $mcp_ok) { $mcp_ec = 1 } } catch { $mcp_ec = 1 }; Write-Output "${endMarker} $mcp_ec"`;
+                return `Write-Output "${startMarker}"; $mcp_ec = 0; $mcp_ok = $null; $mcp_e0 = $Error.Count; try { $global:LASTEXITCODE = 0; Invoke-Expression '${psEscaped}; $mcp_ok = $?'; if ($LASTEXITCODE -ne 0) { $mcp_ec = $LASTEXITCODE } elseif ($null -eq $mcp_ok) { if ($Error.Count -gt $mcp_e0) { $mcp_ec = 1 } } elseif (-not $mcp_ok) { $mcp_ec = 1 } } catch { $mcp_ec = 1 }; Write-Output "${endMarker} $mcp_ec"`;
             }
 
             case 'fish':
