@@ -12,6 +12,10 @@
  *  3. The Host and Origin header guards (upstream's DNS-rebinding protection)
  *     were deliberately removed, so the assertions below assert their absence
  *     instead of their presence. The loopback bind is the remaining control.
+ *  4. PowerShell support (CR to submit, the Invoke-Expression wrapper, the PS
+ *     branch of detectShellType) is fork-only - upstream has none of it - so a
+ *     dedicated check guards it against being dropped by a merge or by running
+ *     a registry build.
  *
  * Everything else matches upstream, including the tool-count assertion, which
  * doubles as a sentinel for accidentally unregistered tools.
@@ -174,6 +178,58 @@ function testBridgeSyntax() {
     new vm.Script(read('scripts/stdio-bridge.js'), { filename: 'scripts/stdio-bridge.js' });
 }
 
+/**
+ * The whole PowerShell support is fork-only (upstream 1.6.2 and 1.7.1 have no
+ * PS branch at all), and it silently disappears whenever the plugin is
+ * reinstalled from the npm registry - which is exactly how the "PowerShell
+ * commands never run" bug came back once already. These assertions are the
+ * reverse of that: they fail loudly if a merge or a re-port drops any of it.
+ */
+function testPowerShellSupport() {
+    const terminal = read('src/tools/terminal.ts');
+    const wrapper = terminal.slice(
+        terminal.indexOf('private getWrappedCommand('),
+        terminal.indexOf('private findSessionByLocator(')
+    );
+
+    assert.match(wrapper, /case 'powershell':/, 'The shell-aware wrapper must keep a PowerShell branch');
+    assert.match(
+        wrapper,
+        /Invoke-Expression/,
+        'PowerShell commands must be wrapped in Invoke-Expression (no && / eval on PS 5.1)'
+    );
+    assert.match(
+        wrapper,
+        /Invoke-Expression '\$\{psEscaped\}'; \$mcp_ok = \$\?;/,
+        'The PS wrapper must snapshot $? on the statement right after Invoke-Expression'
+    );
+    assert.equal(
+        /elseif \(-not \$\?\)/.test(wrapper),
+        false,
+        'The PS wrapper must not read $? after a condition has been evaluated (it would always be true)'
+    );
+    assert.match(
+        terminal,
+        /if \(shell === 'powershell'\) \{\s*\n\s*return \{ environment: 'powershell', isShell: true \};/,
+        'The active environment probe must short-circuit on PowerShell instead of typing a POSIX probe'
+    );
+    assert.match(
+        terminal,
+        /return process\.platform === 'win32' \? '\\r' : '\\n'/,
+        'Enter must be CR on Windows (ConPTY) and LF elsewhere'
+    );
+    assert.match(
+        terminal,
+        /const COMMAND_PREFIX = ' {4}';/,
+        'Commands and readiness probes must share the 4-space first-byte guard'
+    );
+    assert.match(
+        terminal,
+        /\/PS \[A-Za-z\]:\\\\\//,
+        'detectShellType must keep its PowerShell prompt pattern'
+    );
+}
+
 const tests = [
     ['tool count', testToolCount],
     ['non-blocking dialogs', testNoBlockingBrowserDialogs],
@@ -182,7 +238,8 @@ const tests = [
     ['approval and cancellation guards', testApprovalAndCancellationGuards],
     ['translation parity', testTranslations],
     ['pinned MCP SDK', testPinnedSdkAndLockfile],
-    ['stdio bridge syntax', testBridgeSyntax]
+    ['stdio bridge syntax', testBridgeSyntax],
+    ['PowerShell support', testPowerShellSupport]
 ];
 
 // Run every check before reporting, so one failure does not hide the rest

@@ -343,7 +343,8 @@ export class TerminalToolCategory extends BaseToolCategory {
      * - bash/zsh/sh: eval '...' with single-quote escaping, $? for exit code
      * - fish: eval "..." with backslash escaping, $status for exit code
      * - powershell: Invoke-Expression (PS 5.1 compatible, no && / eval),
-     *   exit code from $LASTEXITCODE (native exes) falling back to $? (cmdlets)
+     *   exit code from $LASTEXITCODE (native exes) falling back to a $?
+     *   snapshot taken immediately after the command (cmdlets)
      */
     private getWrappedCommand(
         command: string,
@@ -356,8 +357,16 @@ export class TerminalToolCategory extends BaseToolCategory {
                 // PowerShell (compatible with 5.1: no `&&`, no `eval`).
                 // Reset $LASTEXITCODE so stale values from previous native
                 // commands don't shadow $? of cmdlet-only failures.
+                //
+                // $? MUST be snapshotted on the statement right after
+                // Invoke-Expression: $? describes the last statement executed,
+                // and evaluating the `if` condition below is itself a statement,
+                // so a `$?` read inside the elseif would always see the
+                // comparison's own success. That made every non-terminating
+                // cmdlet error (`Get-ChildItem C:\nope`) report exit code 0,
+                // i.e. success:true with an error message in the output.
                 const psEscaped = command.replace(/'/g, "''");
-                return `Write-Output "${startMarker}"; $mcp_ec = 0; try { $global:LASTEXITCODE = 0; Invoke-Expression '${psEscaped}'; if ($LASTEXITCODE -ne 0) { $mcp_ec = $LASTEXITCODE } elseif (-not $?) { $mcp_ec = 1 } } catch { $mcp_ec = 1 }; Write-Output "${endMarker} $mcp_ec"`;
+                return `Write-Output "${startMarker}"; $mcp_ec = 0; try { $global:LASTEXITCODE = 0; Invoke-Expression '${psEscaped}'; $mcp_ok = $?; if ($LASTEXITCODE -ne 0) { $mcp_ec = $LASTEXITCODE } elseif (-not $mcp_ok) { $mcp_ec = 1 } } catch { $mcp_ec = 1 }; Write-Output "${endMarker} $mcp_ec"`;
             }
 
             case 'fish':
