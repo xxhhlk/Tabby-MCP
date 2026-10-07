@@ -527,7 +527,13 @@ For split panes:
 - splitTabIndex: Index of parent tab (use for grouping panes)
 - paneIndex: Position within the split (0, 1, 2, ...)
 - totalPanes: Number of panes in the split
-- isFocusedPane: Whether this is the currently focused pane`,
+- isFocusedPane: Whether this is the currently focused pane
+
+Session state:
+- sessionLive: the session is connected and can accept input (false for a restored tab that was never focused)
+- awaitingReconnect: sitting on "press any key to reconnect" after the connection dropped
+- disconnectedByUser: the user pressed Disconnect in Tabby
+exec_command and send_input recover all three states automatically, so these fields are informational.`,
             schema: z.object({}),
             handler: async () => {
                 const sessions = this.findTerminalSessions();
@@ -555,7 +561,7 @@ For split panes:
                         // true => the tab is sitting on "press any key to reconnect"
                         // (MCP can revive this automatically; see ensureSessionLive).
                         awaitingReconnect: reconnectState.awaitingReconnect,
-                        // true => user pressed Disconnect deliberately; MCP will not reconnect it.
+                        // true => user pressed Disconnect deliberately (recovered like any other drop; reported for visibility).
                         disconnectedByUser: reconnectState.blockedByUser,
                         hasActiveCommand: this._activeCommands.has(s.sessionId),
                         // SSH auth state: true while Tabby's keyboard-interactive
@@ -601,7 +607,9 @@ Session targeting (priority order): sessionId > tabId > tabIndex > title > profi
 - profileName: Match by profile name (partial, case-insensitive)
 
 For interactive/paging commands (less, vim, top), set waitForOutput=false.
-For long-running commands, increase timeout or use waitForOutput=false and poll with get_terminal_buffer.`,
+For long-running commands, increase timeout or use waitForOutput=false and poll with get_terminal_buffer.
+
+Connection recovery: if the tab's session is not ready - restored but never focused, dropped, or its last connect attempt failed - the tab is activated and reconnected automatically before the command is sent, waiting up to the configured activation timeout. A hand-disconnected tab is reconnected too. Check the response for activatedTab / autoReconnectAttempted / reconnectedAfterManualDisconnect to see what happened.`,
             schema: z.object({
                 command: z.string().describe('Command to execute'),
                 sessionId: z.string().optional().describe('Stable session ID (recommended, from get_session_list)'),
@@ -1263,7 +1271,9 @@ For long-running commands, increase timeout or use waitForOutput=false and poll 
             name: 'send_input',
             description: `Send raw input to a terminal. Use this for interactive commands like vim, less, top, etc.
 Session targeting: sessionId > tabId > tabIndex > title > profileName
-Special keys: \\x03 (Ctrl+C), \\x04 (Ctrl+D), \\x1b (Escape), \\r (Enter)`,
+Special keys: \\x03 (Ctrl+C), \\x04 (Ctrl+D), \\x1b (Escape), \\r (Enter)
+
+Connection recovery: if the tab's session is not ready - restored but never focused, dropped, or its last connect attempt failed - the tab is activated and reconnected automatically before the input is sent, waiting up to the configured activation timeout. A hand-disconnected tab is reconnected too. Check the response for activatedTab / autoReconnectAttempted / reconnectedAfterManualDisconnect to see what happened.`,
             schema: z.object({
                 input: z.string().describe('Input to send (can include special characters like \\n, \\x03 for Ctrl+C)'),
                 sessionId: z.string().optional().describe('Stable session ID (recommended)'),
