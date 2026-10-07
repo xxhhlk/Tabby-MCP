@@ -4,7 +4,25 @@ All notable changes to Tabby-MCP will be documented in this file.
 
 ## [Unreleased]
 
+## [1.7.1-fork.5] - 2026-10-08
+
+### 🔧 Changed
+- 工具描述补充会话恢复行为：`exec_command` / `send_input` 说明未就绪的会话（冷标签 / 连接断开 / 连接失败 / 手动断开）会被自动恢复；`get_session_list` 说明 `sessionLive`、`awaitingReconnect`、`disconnectedByUser` 为信息性字段而非调用前置条件。
+
 ## [1.7.1-fork.4] - 2026-10-05
+
+### ✨ Added
+- **会话自动恢复**：`exec_command` / `send_input` 在发送前先确保目标会话可用，覆盖四种状态 ——
+  - 恢复但未聚焦的冷标签：激活标签并轮询等待会话建立；
+  - 连接断开（「按任意键重新连接」）：直接调 Tabby 的 `reconnect()`，不再干等到超时；
+  - 上次连接在 socket 层失败（`os error 10060` / `10061`，Tabby 此时不提供任何重连入口）：同样触发重连；
+  - 用户手动点过「断开连接」：一并重连，响应里以 `reconnectedAfterManualDisconnect` 标注。
+- 会话可写后再用幂等 `echo` 探针确认远端 shell 真正开始消费输入（启动 / 重连窗口会丢弃或吞掉提前写入的字节），确认后才发送真命令；命令统一加 4 空格前缀规避首字节被吃。
+- `get_session_list` 新增 `sessionLive`、`awaitingReconnect`、`disconnectedByUser` 字段。
+
+### 🔧 Changed
+- `mcp.timing.sessionActivationTimeout` 默认 20000 → 30000：SSH 配置自身的 `readyTimeout` 默认也是 20000，原值会让 MCP 比客户端先放弃。
+- 两个输出等待器在会话对象被置空时立即中止，并区分「断开」与「丢失」，不再空转到超时。
 
 ### 🐛 Fixed
 - **命令以 `#` 注释结尾时失败仍报 `exitCode:0`**（fork.3 的残留缺口）：`$mcp_ok` 的追加语句 `; $mcp_ok = $?` 被行尾注释吞掉，`$mcp_ok` 停在预置的 `$true`，于是 `Get-Item C:\nope  # comment` 报 `success:true`。
