@@ -76,10 +76,16 @@ export class TerminalToolCategory extends BaseToolCategory {
     // Shell type cache per session (avoids repeated detection)
     private shellTypeCache = new Map<string, 'bash' | 'zsh' | 'fish' | 'sh' | 'powershell'>();
 
-    // Session objects whose shell has confirmed (via the idempotent echo probe)
-    // that it consumes input. Keyed by the session *object* on purpose: a
-    // reconnect produces a new one, so readiness is re-established automatically.
-    private shellReadySessions = new WeakSet<object>();
+    // Session objects whose shell last confirmed (via the idempotent echo probe)
+    // that it consumes input, mapped to the timestamp of that confirmation.
+    // Keyed by the session *object* on purpose: a reconnect produces a new one,
+    // so readiness is re-established automatically.
+    //
+    // The timestamp is what makes a stale session detectable. A session can be
+    // open and answer SSH keepalives while its remote shell has stopped
+    // consuming input (suspended host, wedged pty) - nothing about the session
+    // object changes when that happens, so a confirmation cannot be permanent.
+    private shellReadyAt = new WeakMap<object, number>();
 
     // Command security manager (lazy initialized)
     private securityManager?: CommandSecurityManager;
@@ -997,6 +1003,49 @@ Connection recovery: if the tab's session is not ready - restored but never focu
     }
 
     /**
+     * Should the readiness probe run again for this session object?
+     *
+     * A confirmation is only good for so long. Nothing in the session object
+     * changes when a remote shell stops consuming input, so the only way to
+     * notice is to ask again - and asking on every command would add two lines
+     * of noise to each one. Re-probing an idle session strikes the balance.
+     */
+    private needsProbe(sessionObj: object): boolean {
+        const last = this.shellReadyAt.get(sessionObj);
+        if (last === undefined) {
+            return true;
+        }
+        const interval = this.config.store.mcp?.timing?.shellReprobeInterval ?? 60000;
+        return Date.now() - last >= interval;
+    }
+
+    /**
+     * Is the session sitting at a shell prompt, with the prompt as the last
+     * thing on screen?
+     *
+     * Only used to decide whether a *repeat* probe is safe. A confirmed session
+     * whose last line is prompt-shaped can be re-probed harmlessly; one showing
+     * a program's output cannot - typing there would feed the probe into that
+     * program's stdin. In the latter case the session simply keeps its previous
+     * confirmation and behaves exactly as it did before re-probing existed.
+     */
+    private isAtShellPrompt(session: TerminalSessionWithTab): boolean {
+        try {
+            const lines = this.getTerminalBufferText(session).split('\n');
+            for (let i = lines.length - 1; i >= 0; i--) {
+                const clean = stripAnsi(lines[i]).replace(/\u001b\[[0-9;?]*[a-zA-Z]/g, '').trim();
+                if (!clean) {
+                    continue;
+                }
+                return /[$#%❯➜>]\s*$/.test(clean);
+            }
+        } catch {
+            // An unreadable buffer must not turn into a reconnect.
+        }
+        return false;
+    }
+
+    /**
      * Guarantee the target session can receive input, activating the tab first
      * when it is still cold (restored but never focused), and driving Tabby's
      * "press any key to reconnect" prompt when the session was lost.
@@ -1011,34 +1060,6 @@ Connection recovery: if the tab's session is not ready - restored but never focu
         alreadyActivated: boolean
     ): Promise<{ ok: boolean; activated: boolean; reconnected?: boolean; manualDisconnect?: boolean; waitedMs: number; shellReady?: boolean; shellReadyWaitMs?: number; probeAttempts?: number; error?: string; hint?: string }> {
         const sessionObj = (session.tab as any).session;
-
-        if (this.isSessionWritable(session)) {
-            // Writable != ready. A session object that appeared *between* two MCP
-            // calls - e.g. select_tab on a cold tab, then exec_command - is already
-            // `open` while the remote shell is still running its profile, and bash
-            // discards type-ahead written in that window. The old code returned
-            // here immediately, so that command vanished and only surfaced as
-            // "Command timeout" with empty output.
-            //
-            // Probe once per session object to rule it out. isProbeSafe() keeps
-            // this off sessions that are already running an interactive program.
-            if (sessionObj && !this.shellReadySessions.has(sessionObj) && this.isProbeSafe(session)) {
-                const shell = await this.waitForShellReady(session);
-                if (shell.ready) {
-                    this.shellReadySessions.add(sessionObj);
-                }
-                return {
-                    ok: true,
-                    activated: alreadyActivated,
-                    waitedMs: 0,
-                    shellReady: shell.ready,
-                    shellReadyWaitMs: shell.waitedMs,
-                    probeAttempts: shell.attempts
-                };
-            }
-            return { ok: true, activated: alreadyActivated, waitedMs: 0 };
-        }
-
         const timing = this.config.store.mcp?.timing || {};
         const pollInterval = timing.sessionPollInterval ?? 200;
         const timeout = timing.sessionActivationTimeout ?? 30000;
@@ -1061,37 +1082,108 @@ Connection recovery: if the tab's session is not ready - restored but never focu
         // signal. The flag is kept only so the response can say what happened.
         const manualDisconnect = reconnectState.blockedByUser;
 
-        // The tab is sitting on "press any key to reconnect" - nothing else will
-        // ever revive it, so trigger the reconnect instead of waiting it out.
         let reconnected = false;
-        if ((reconnectState.awaitingReconnect || manualDisconnect) && reconnectState.canReconnect && this.isAutoReconnectEnabled()) {
-            this.logger.warn(
-                `[ensureSessionLive] Session ${session.sessionId} is awaiting "press any key to reconnect"` +
-                `${manualDisconnect ? ' (disconnected by hand in Tabby)' : ''} - triggering tab.reconnect()`
-            );
-            this.markConnectAttempt(tabAny);
-            this.requestReconnect(session);
-            reconnected = true;
-        } else if (attachedBeforeActivation && reconnectState.canReconnect && this.isAutoReconnectEnabled() && this.mayRetryConnect(tabAny)) {
-            // Third state: the tab was connected, the link dropped, and Tabby's
-            // own reconnect attempt died at the socket level ("os error 10060" /
-            // "10061"). SSH's initializeSession() throws before ever calling
-            // setSession(), so onSessionDestroyed() never fires and Tabby offers
-            // NOTHING: no "press any key to reconnect" prompt, reconnectOffered
-            // stays false. Without this branch the tab stays dead until a human
-            // picks Reconnect from the tab menu - every MCP call just waits out
-            // its timeout and reports the misleading "restored on startup" cause.
+
+        if (this.isSessionWritable(session)) {
+            // Writable != ready. A session object that appeared *between* two MCP
+            // calls - e.g. select_tab on a cold tab, then exec_command - is already
+            // `open` while the remote shell is still running its profile, and bash
+            // discards type-ahead written in that window. The old code returned
+            // here immediately, so that command vanished and only surfaced as
+            // "Command timeout" with empty output.
             //
-            // Gated on the pre-activation frontend snapshot: a cold tab must not
-            // be reconnected here, because its in-flight initializeSession() has
-            // no re-entrancy guard and we would open a second SSH connection.
-            this.logger.warn(
-                `[ensureSessionLive] Session ${session.sessionId} has no session and no reconnect prompt ` +
-                `(the last connect attempt failed) - triggering tab.reconnect()`
-            );
-            this.markConnectAttempt(tabAny);
-            this.requestReconnect(session);
-            reconnected = true;
+            // The same probe also catches the opposite case: a session confirmed
+            // earlier that has gone stale since - still open, still answering SSH
+            // keepalives, but no longer feeding input to its shell. A cold session
+            // is probed once; a confirmed one is re-probed once it has been idle
+            // past mcp.timing.shellReprobeInterval. isProbeSafe() keeps both probes
+            // off an interactive program, isAtShellPrompt() keeps the repeat probe
+            // off a busy one.
+            const probeTarget: object | null = sessionObj ?? null;
+            const confirmed = probeTarget !== null && this.shellReadyAt.has(probeTarget);
+            const shouldProbe = probeTarget !== null
+                && this.isProbeSafe(session)
+                && (!confirmed || (this.needsProbe(probeTarget) && this.isAtShellPrompt(session)));
+
+            if (probeTarget && shouldProbe) {
+                // A confirmed shell answers within ~100-300ms, so it gets a short
+                // window; only a cold one needs the full cold-start budget.
+                const shell = await this.waitForShellReady(
+                    session,
+                    confirmed ? Math.min(timing.shellReadyTimeout ?? 10000, 3000) : undefined
+                );
+                if (shell.ready) {
+                    this.shellReadyAt.set(probeTarget, Date.now());
+                    return {
+                        ok: true,
+                        activated: alreadyActivated,
+                        waitedMs: 0,
+                        shellReady: true,
+                        shellReadyWaitMs: shell.waitedMs,
+                        probeAttempts: shell.attempts
+                    };
+                }
+
+                // Confirmed before, silent now, and the probe was not even echoed:
+                // the bytes never reached the remote tty. Nothing on this side can
+                // revive that session short of rebuilding it. A probe that WAS
+                // echoed means the tty is alive and something else owns the input
+                // line, which is a normal state - send the command as before.
+                if (confirmed && !shell.echoed && reconnectState.canReconnect && this.isAutoReconnectEnabled() && this.mayRetryConnect(tabAny)) {
+                    this.logger.warn(
+                        `[ensureSessionLive] Session ${session.sessionId} is open but stopped consuming input ` +
+                        `(probe not even echoed) - rebuilding the session`
+                    );
+                    this.markConnectAttempt(tabAny);
+                    this.requestReconnect(session);
+                    reconnected = true;
+                } else {
+                    return {
+                        ok: true,
+                        activated: alreadyActivated,
+                        waitedMs: 0,
+                        shellReady: false,
+                        shellReadyWaitMs: shell.waitedMs,
+                        probeAttempts: shell.attempts
+                    };
+                }
+            } else {
+                return { ok: true, activated: alreadyActivated, waitedMs: 0 };
+            }
+        }
+
+        if (!reconnected) {
+            // The tab is sitting on "press any key to reconnect" - nothing else will
+            // ever revive it, so trigger the reconnect instead of waiting it out.
+            if ((reconnectState.awaitingReconnect || manualDisconnect) && reconnectState.canReconnect && this.isAutoReconnectEnabled()) {
+                this.logger.warn(
+                    `[ensureSessionLive] Session ${session.sessionId} is awaiting "press any key to reconnect"` +
+                    `${manualDisconnect ? ' (disconnected by hand in Tabby)' : ''} - triggering tab.reconnect()`
+                );
+                this.markConnectAttempt(tabAny);
+                this.requestReconnect(session);
+                reconnected = true;
+            } else if (attachedBeforeActivation && reconnectState.canReconnect && this.isAutoReconnectEnabled() && this.mayRetryConnect(tabAny)) {
+                // Third state: the tab was connected, the link dropped, and Tabby's
+                // own reconnect attempt died at the socket level ("os error 10060" /
+                // "10061"). SSH's initializeSession() throws before ever calling
+                // setSession(), so onSessionDestroyed() never fires and Tabby offers
+                // NOTHING: no "press any key to reconnect" prompt, reconnectOffered
+                // stays false. Without this branch the tab stays dead until a human
+                // picks Reconnect from the tab menu - every MCP call just waits out
+                // its timeout and reports the misleading "restored on startup" cause.
+                //
+                // Gated on the pre-activation frontend snapshot: a cold tab must not
+                // be reconnected here, because its in-flight initializeSession() has
+                // no re-entrancy guard and we would open a second SSH connection.
+                this.logger.warn(
+                    `[ensureSessionLive] Session ${session.sessionId} has no session and no reconnect prompt ` +
+                    `(the last connect attempt failed) - triggering tab.reconnect()`
+                );
+                this.markConnectAttempt(tabAny);
+                this.requestReconnect(session);
+                reconnected = true;
+            }
         }
 
         this.logger.warn(
@@ -1110,10 +1202,11 @@ Connection recovery: if the tab's session is not ready - restored but never focu
                 // swallows type-ahead written during that window (see below).
                 const shell = await this.waitForShellReady(session);
                 if (shell.ready) {
-                    // Remember this session object so later calls skip the probe.
+                    // Remember this session object (and when) so later calls can
+                    // skip the probe until it has been idle long enough to matter.
                     const liveObj = (session.tab as any).session;
                     if (liveObj) {
-                        this.shellReadySessions.add(liveObj);
+                        this.shellReadyAt.set(liveObj, Date.now());
                     }
                 }
                 return {
@@ -1217,13 +1310,20 @@ Connection recovery: if the tab's session is not ready - restored but never focu
      * Callers must gate this with isProbeSafe(): the probe is safe on a shell
      * that is still starting up, but must never be typed into a full-screen app
      * or a REPL. ensureSessionLive() is the only caller and does exactly that.
+     *
+     * The result also reports whether the probe line was *echoed*. That
+     * separates the two ways a probe can go unanswered: an echo without the
+     * joined token means the bytes did reach the tty and something else (a
+     * running program) owns the input line, while no echo at all means the
+     * session is wedged and nothing is reaching the remote tty anymore.
      */
     private async waitForShellReady(
-        session: TerminalSessionWithTab
-    ): Promise<{ ready: boolean; waitedMs: number; attempts: number }> {
+        session: TerminalSessionWithTab,
+        budgetOverride?: number
+    ): Promise<{ ready: boolean; waitedMs: number; attempts: number; echoed: boolean }> {
         const timing = this.config.store.mcp?.timing || {};
         const pollInterval = timing.sessionPollInterval ?? 200;
-        const budget = timing.shellReadyTimeout ?? 10000;
+        const budget = budgetOverride ?? timing.shellReadyTimeout ?? 10000;
         // A ready shell answers a probe within ~100-300ms, so a short window is
         // enough: if nothing comes back the shell is still initialising and we
         // should re-probe soon instead of burning the whole budget on one wait.
@@ -1231,6 +1331,7 @@ Connection recovery: if the tab's session is not ready - restored but never focu
         const perAttempt = Math.min(2000, Math.max(800, budget));
         const started = Date.now();
         let attempts = 0;
+        let echoed = false;
 
         while (Date.now() - started < budget) {
             attempts++;
@@ -1246,10 +1347,14 @@ Connection recovery: if the tab's session is not ready - restored but never focu
 
             const attemptDeadline = Math.min(started + budget, Date.now() + perAttempt);
             while (Date.now() < attemptDeadline) {
-                if (this.getTerminalBufferText(session).includes(token)) {
+                const bufferText = this.getTerminalBufferText(session);
+                if (bufferText.includes(token)) {
                     const waitedMs = Date.now() - started;
                     this.logger.info(`[waitForShellReady] Shell consumed input after ${waitedMs}ms (${attempts} probe attempt(s))`);
-                    return { ready: true, waitedMs, attempts };
+                    return { ready: true, waitedMs, attempts, echoed: true };
+                }
+                if (bufferText.includes(typed)) {
+                    echoed = true;
                 }
                 await new Promise(resolve => setTimeout(resolve, pollInterval));
             }
@@ -1257,10 +1362,10 @@ Connection recovery: if the tab's session is not ready - restored but never focu
 
         const waitedMs = Date.now() - started;
         this.logger.warn(
-            `[waitForShellReady] Shell did not confirm readiness within ${waitedMs}ms (${attempts} probe attempt(s)) - ` +
+            `[waitForShellReady] Shell did not confirm readiness within ${waitedMs}ms (${attempts} probe attempt(s), echoed=${echoed}) - ` +
             `sending the command anyway (raise mcp.timing.shellReadyTimeout for very slow hosts)`
         );
-        return { ready: false, waitedMs, attempts };
+        return { ready: false, waitedMs, attempts, echoed };
     }
 
     /**

@@ -471,6 +471,13 @@ import { PLUGIN_VERSION } from '../version';
       </div>
 
       <div class="form-group">
+        <label>{{ t('mcp.timing.shellReprobeInterval') }}</label>
+        <input type="number" class="form-control" [(ngModel)]="config.store.mcp.timing.shellReprobeInterval" 
+               placeholder="60000" min="0" max="3600000" (change)="saveConfig()">
+        <small class="form-text text-muted">{{ t('mcp.timing.shellReprobeInterval.desc') }}</small>
+      </div>
+
+      <div class="form-group">
         <div class="checkbox">
           <label>
             <input type="checkbox" [ngModel]="config.store.mcp.timing.autoReconnect ?? true" (ngModelChange)="setAutoReconnect($event)">
@@ -902,6 +909,7 @@ export class McpSettingsTabComponent implements OnInit, OnDestroy {
         sessionPollInterval: 200,
         sessionActivationTimeout: 30000,
         shellReadyTimeout: 10000,
+        shellReprobeInterval: 60000,
         autoReconnect: true
       };
     }
@@ -1120,6 +1128,7 @@ export class McpSettingsTabComponent implements OnInit, OnDestroy {
         sessionPollInterval: 200,
         sessionActivationTimeout: 30000,
         shellReadyTimeout: 10000,
+        shellReprobeInterval: 60000,
         autoReconnect: true
       };
     }

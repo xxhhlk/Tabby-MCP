@@ -99,6 +99,8 @@
     "mcp.timing.sessionActivationTimeout.desc": "How long to wait for a restored (not yet focused) tab - or a tab whose last connect attempt failed - to create and connect its session before failing the command. Keep it above the SSH profile's own readyTimeout (20000), otherwise MCP gives up before the client does (default: 30000)",
     "mcp.timing.shellReadyTimeout": "Shell Readiness Probe Timeout (ms)",
     "mcp.timing.shellReadyTimeout.desc": "After a cold tab connects, how long to keep probing (idempotent echo) until the remote shell really consumes input. The shell swallows type-ahead while it initialises (default: 10000)",
+    "mcp.timing.shellReprobeInterval": "Shell Re-probe Interval (ms)",
+    "mcp.timing.shellReprobeInterval.desc": "How long a confirmed session may stay idle before its shell readiness is checked again. A session can stay open (keepalives answered) while its remote shell stops consuming input, and only a re-probe notices; set to 0 to re-probe before every command (default: 60000)",
     "mcp.timing.autoReconnect": "Auto-reconnect dropped sessions",
     "mcp.timing.autoReconnect.desc": "When a tab shows \"Press any key to reconnect\" because the connection dropped, trigger Tabby's own reconnect automatically instead of waiting for the timeout. Applies to tabs you disconnected by hand too (the response then says reconnectedAfterManualDisconnect); turn this off to leave those alone (default: on)",
     "mcp.connectionInfo.title": "Connection Info",

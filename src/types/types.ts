@@ -87,6 +87,7 @@ export interface McpConfig {
         sessionPollInterval: number;
         sessionActivationTimeout?: number;   // Local fork: cold-tab / failed-connect budget (ms)
         shellReadyTimeout?: number;          // Local fork: shell readiness probe budget (ms)
+        shellReprobeInterval?: number;       // Local fork: re-probe a confirmed session after this much idle time (ms)
         autoReconnect?: boolean;             // Local fork: revive "press any key to reconnect" tabs (incl. manual disconnect)
     };
     sessionTracking: {

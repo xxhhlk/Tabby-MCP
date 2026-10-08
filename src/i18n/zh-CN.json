@@ -99,6 +99,8 @@
     "mcp.timing.sessionActivationTimeout.desc": "恢复但未激活的标签（以及上次连接尝试失败的标签），等待其创建并连接会话的最长时间，超时则命令失败。建议高于 SSH 配置自身的 readyTimeout（20000），否则 MCP 会比客户端先放弃（默认：30000）",
     "mcp.timing.shellReadyTimeout": "Shell 就绪探测上限（毫秒）",
     "mcp.timing.shellReadyTimeout.desc": "冷标签连上后，持续用幂等 echo 探测直到远端 shell 真正开始消费输入的最长时间。shell 初始化期间会丢弃提前写入的输入（默认：10000）",
+    "mcp.timing.shellReprobeInterval": "Shell 复探间隔（毫秒）",
+    "mcp.timing.shellReprobeInterval.desc": "已确认可用的会话空闲多久后重新检查一次 shell 就绪。会话可能保持「已连接」（keepalive 有应答）但远端 shell 已不再消费输入，只有复探才能发现；设为 0 表示每条命令前都复探（默认：60000）",
     "mcp.timing.autoReconnect": "自动重连已断开的会话",
     "mcp.timing.autoReconnect.desc": "标签因连接断开而显示「按任意键重新连接」时，自动触发 Tabby 自带的重连，而不是干等到超时。手动点过「断开连接」的标签同样会被重连（响应里会标注 reconnectedAfterManualDisconnect）；不想重连它们就关掉本开关（默认：开启）",
     "mcp.connectionInfo.title": "连接信息",

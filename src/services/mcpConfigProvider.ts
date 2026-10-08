@@ -39,6 +39,10 @@ export class McpConfigProvider extends ConfigProvider {
                 // Local fork: cold-tab activation and shell readiness probe budgets
                 sessionActivationTimeout: 30000,
                 shellReadyTimeout: 10000,
+                // Local fork: re-probe a confirmed session once it has been idle
+                // this long, so a session that stops consuming input (open, but
+                // wedged) is detected instead of silently swallowing commands
+                shellReprobeInterval: 60000,
                 // Local fork: call the tab's own reconnect() when it is sitting on
                 // "press any key to reconnect" (tabs disconnected by hand stay off)
                 autoReconnect: true
