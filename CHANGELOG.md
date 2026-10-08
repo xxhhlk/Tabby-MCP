@@ -4,6 +4,17 @@ All notable changes to Tabby-MCP will be documented in this file.
 
 ## [Unreleased]
 
+## [1.7.1-fork.6] - 2026-10-08
+
+### 🐛 Fixed
+- **会话「已连接但不再消费输入」时命令被静默丢弃**：会话对象保持 `open`（SSH keepalive 有应答），远端 shell 却已不再读取输入。写入的命令连回显都没有，最终只报 `Command timeout` 加空输出，而三个既有的自动恢复分支全都不适用（`isSessionWritable()` 为真就提前返回），只能人工点「重新连接」才能恢复。
+  - 修法：探针缓存由「每个会话对象只探一次」改为记录**确认时间戳**（`shellReadyAt`），空闲超过 `mcp.timing.shellReprobeInterval`（新增，默认 60000ms）后重新探测；已确认会话的复探预算收紧到 3s（确认过的 shell 通常 100–300ms 就应答），冷会话仍用完整预算。
+  - `waitForShellReady()` 新增 `echoed` 判据，用来区分两种「探针无应答」：**有回显、无 token** 说明字节已到达 tty、只是别的东西占着输入行，属于正常状态，保持原行为；**连回显都没有** 说明输入根本没到远端 tty，此时自动 `reconnect()` 并重试（响应中带 `autoReconnectAttempted`）。
+  - 复探由 `isAtShellPrompt()` 把关：屏幕最后一行不是提示符（例如正在跑 `tail -f`）时跳过复探，避免把探针写进前台程序的 stdin。冷会话的探测时机与之前一致。
+
+### ✨ Added
+- `mcp.timing.shellReprobeInterval`（默认 60000，设为 0 表示每条命令前都复探），设置页与中英文文案同步。
+
 ## [1.7.1-fork.5] - 2026-10-08
 
 ### 🔧 Changed
